@@ -19,7 +19,7 @@ use tokio::sync::{Mutex, Notify};
 use tokio::time;
 use tracing::Instrument;
 use windows::Win32::Foundation::{CloseHandle, HANDLE};
-use windows::Win32::Security::{SECURITY_ATTRIBUTES, DuplicateTokenEx, SecurityImpersonation, TokenPrimary, TOKEN_ALL_ACCESS, PSECURITY_DESCRIPTOR};
+use windows::Win32::Security::{SECURITY_ATTRIBUTES, DuplicateTokenEx, GetTokenInformation, SecurityImpersonation, TokenPrimary, TokenLinkedToken, TOKEN_ALL_ACCESS, TOKEN_LINKED_TOKEN, PSECURITY_DESCRIPTOR};
 use windows::Win32::Security::Authorization::{ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1};
 use windows::Win32::System::RemoteDesktop::{WTSGetActiveConsoleSessionId, WTSQueryUserToken};
 use windows::Win32::System::Threading::{CreateProcessAsUserW, TerminateProcess, PROCESS_INFORMATION, STARTUPINFOW, CREATE_NO_WINDOW, CREATE_UNICODE_ENVIRONMENT};
@@ -220,6 +220,18 @@ impl RkvmClient {
 
             let mut user_token: HANDLE = HANDLE::default();
             WTSQueryUserToken(session_id, &mut user_token)?;
+
+            
+            let mut needed = 0 as u32;
+            let _ = GetTokenInformation(user_token, TokenLinkedToken, None, 0, &mut needed);
+            let mut buffer = vec![0u8; needed as usize];
+            match GetTokenInformation(user_token, TokenLinkedToken, Some(buffer.as_mut_ptr() as *mut _), needed, &mut needed) {
+                Ok(_) => {
+                    let token_linked: &TOKEN_LINKED_TOKEN = &*(buffer.as_ptr() as *const TOKEN_LINKED_TOKEN);
+                    user_token = token_linked.LinkedToken
+                },
+                Err(e) => tracing::info!("Failed to get linked token {:?}", e)
+            };
 
             let mut primary_token: HANDLE = HANDLE::default();
             DuplicateTokenEx(user_token, TOKEN_ALL_ACCESS, None, SecurityImpersonation, TokenPrimary, &mut primary_token)?;

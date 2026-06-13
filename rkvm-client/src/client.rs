@@ -134,7 +134,7 @@ pub async fn init_stream(hostname: &ServerName, port: u16, connector: &TlsConnec
     Ok(RkvmStream::Tcp(stream))
 }
 
-pub async fn run<R,W,H>(mut reader: R, mut writer: W, mut handler: H) -> Result<(), Error> 
+pub async fn run<R,W,H>(reader: &mut R, writer: &mut W, mut handler: H) -> Result<(), Error> 
     where
         R: AsyncRead + Send + Unpin,
         W: RkvmWriter + Send,
@@ -145,7 +145,7 @@ pub async fn run<R,W,H>(mut reader: R, mut writer: W, mut handler: H) -> Result<
     let timeout_duration = rkvm_net::PING_INTERVAL + rkvm_net::READ_TIMEOUT;
 
     loop {
-        let update = match time::timeout(timeout_duration, Update::decode(&mut reader)).await {
+        let update = match time::timeout(timeout_duration, Update::decode(reader)).await {
             Err(_) => Err(Error::Network(io::Error::new(io::ErrorKind::TimedOut, "Ping timeout"))),
             Ok(res) => res.map_err(Error::Network)
         }?;

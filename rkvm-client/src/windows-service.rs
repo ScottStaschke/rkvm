@@ -3,30 +3,34 @@ mod client;
 mod config;
 mod stream;
 mod tls;
+mod windows_daemon;
 
 use crate::stream::{RkvmWriter, LockWriter};
+use crate::windows_daemon::client_process::ClientProcess;
 
 use client::{init_tracing, init_config, Error};
 use rkvm_net::Update;
-use std::ffi::{OsString, c_void};
+use std::io::ErrorKind;
+use std::ffi::{OsString, CStr, c_void};
 use std::path::PathBuf;
 use std::ptr::{addr_of_mut, null_mut};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::io::split;
+use tokio::io::{ReadHalf, WriteHalf, split};
 use tokio::net::windows::named_pipe::{ServerOptions, NamedPipeServer};
 use tokio::sync::{Mutex, Notify};
-use tokio::time;
+use tokio::time::interval;
 use tracing::Instrument;
 use windows::Win32::Foundation::{CloseHandle, HANDLE};
-use windows::Win32::Security::{SECURITY_ATTRIBUTES, DuplicateTokenEx, GetTokenInformation, SecurityImpersonation, TokenPrimary, TokenLinkedToken, TOKEN_ALL_ACCESS, TOKEN_LINKED_TOKEN, PSECURITY_DESCRIPTOR};
+use windows::Win32::Security::{SECURITY_ATTRIBUTES, GetTokenInformation, TokenLinkedToken, TOKEN_ALL_ACCESS, TOKEN_LINKED_TOKEN, PSECURITY_DESCRIPTOR};
 use windows::Win32::Security::Authorization::{ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1};
-use windows::Win32::System::RemoteDesktop::{WTSGetActiveConsoleSessionId, WTSQueryUserToken};
-use windows::Win32::System::Threading::{CreateProcessAsUserW, TerminateProcess, PROCESS_INFORMATION, STARTUPINFOW, CREATE_NO_WINDOW, CREATE_UNICODE_ENVIRONMENT};
-use windows::core::{PWSTR,PCWSTR};
+use windows::Win32::System::Diagnostics::ToolHelp::{CreateToolhelp32Snapshot, TH32CS_SNAPPROCESS, PROCESSENTRY32, Process32First, Process32Next };
+use windows::Win32::System::RemoteDesktop::{WTSGetActiveConsoleSessionId, WTSQueryUserToken, ProcessIdToSessionId};
+use windows::Win32::System::Threading::{OpenProcess, OpenProcessToken, PROCESS_ALL_ACCESS};
+use windows::core::{PCWSTR};
 use windows_service::define_windows_service;
 use windows_service::service::{ServiceControl, ServiceControlAccept, ServiceExitCode, ServiceState, ServiceStatus,ServiceType};
-use windows_service::service_control_handler::{self, ServiceControlHandlerResult};
+use windows_service::service_control_handler::{register, ServiceControlHandlerResult};
 use windows_service::service_dispatcher;
 
 const SERVICE_NAME: &str = "RkvmService";
@@ -71,7 +75,7 @@ fn run_service() -> windows_service::Result<()> {
         }
     };
 
-    let status_handle = service_control_handler::register(SERVICE_NAME, event_handler)?;
+    let status_handle = register(SERVICE_NAME, event_handler)?;
 
     let status = ServiceStatus {
         service_type: SERVICE_TYPE,
@@ -86,7 +90,7 @@ fn run_service() -> windows_service::Result<()> {
     status_handle.set_service_status(status)?;
 
     let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
-    match rt.block_on(process(stop_notify)) {
+    match rt.block_on(process(stop_notify.clone())) {
           Ok(_) => {
             tracing::info!("Service stopped normally");
 
@@ -122,7 +126,9 @@ async fn process(stop_notify: Arc<Notify>) -> Result<(), Error> {
 
     let pipe = new_pipe()?;
     let connect = pipe.connect();
-    let rkvm_client = RkvmClient::new();
+
+    let mut cmd: Vec<u16> = to_wide(format!("\"{}\" --log-file {} --pipe {}", CLIENT_PATH, CLIENT_LOG, SERVICE_PIPE).as_str());
+    let _guard = ClientProcess::new(cmd);
     connect.await?;
 
     let (pipe_r, pipe_w) = split(pipe);
@@ -130,7 +136,7 @@ async fn process(stop_notify: Arc<Notify>) -> Result<(), Error> {
     let config = init_config(SERVICE_CFG).await?;
     let connector = tls::configure(&config.certificate).await?;
     let stream = client::init_stream(&config.server.hostname, config.server.port, &connector, &config.password).await?;
-    let (stream_r, stream_w) = split(stream);
+    let (mut stream_r, mut stream_w) = split(stream);
 
     let pw = Arc::new(Mutex::new(pipe_w));
     let pipe_w = LockWriter::new(pw.clone());
@@ -139,26 +145,12 @@ async fn process(stop_notify: Arc<Notify>) -> Result<(), Error> {
         pw.lock().await.send(update).await
     };
 
-    let client_update = |update| async move {
-        // handle missing communication
-        tracing::debug!("client respond {:?}", update);
-        Ok(())
-    };
-
-    let mut interval = time::interval(rkvm_net::PING_INTERVAL);
-    interval.tick().await;
-
     let span_server = tracing::info_span!("run", stream="server");
     let span_client = tracing::info_span!("run", stream="client");
     tokio::select! {
-        res = client::run(stream_r, stream_w, srv_update).instrument(span_server) => res,
-        res = client::run(pipe_r, pipe_w, client_update).instrument(span_client) => res,
-        res = async {
-            loop {
-                interval.tick().await;
-                pw.lock().await.send(Update::Ping).await?
-            }
-        } => res,
+        res = client::run(&mut stream_r, &mut stream_w, srv_update).instrument(span_server) => res,
+        res = run_client(pipe_r, pipe_w).instrument(span_client) => res,
+        res = ping_sender(pw.clone()) => res,
         _ = stop_notify.notified() => {
             tracing::info!("Service requested stop");
             Ok(())
@@ -167,6 +159,37 @@ async fn process(stop_notify: Arc<Notify>) -> Result<(), Error> {
     Ok(())
 }
 
+async fn ping_sender(pw: Arc<Mutex<WriteHalf<NamedPipeServer>>>) -> Result<(),Error> {
+    let mut interval = interval(rkvm_net::PING_INTERVAL);
+    interval.tick().await;
+    loop {
+        interval.tick().await;
+        pw.lock().await.send(Update::Ping).await?
+    }
+}
+
+async fn run_client(mut reader: ReadHalf<NamedPipeServer>, mut writer: LockWriter<WriteHalf<NamedPipeServer>>) -> Result<(), Error> {
+    let client_update = |update| async move {
+        // handle missing communication
+        tracing::debug!("client respond {:?}", update);
+        Ok(())
+    };
+    loop {
+        let res = client::run(&mut reader, &mut writer, client_update).await;
+        if let Err(ref e) = res {
+            tracing::info!("Client error: {:?}", e);
+            match e {
+                Error::Network(ref io) => {
+                    if io.kind() == ErrorKind::UnexpectedEof {
+                        continue;
+                    }
+                }
+                _ => {}
+            }
+        }
+        return res;
+    }
+}
 
 fn new_pipe() -> Result<NamedPipeServer, Error> {
     unsafe {
@@ -200,54 +223,4 @@ fn to_wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
-struct RkvmClient {
-    handle: HANDLE,
-}
 
-impl Drop for RkvmClient {
-    fn drop(&mut self) {
-        unsafe {
-            let _ = TerminateProcess(self.handle, 0);
-            let _ = CloseHandle(self.handle);
-        }
-    }
-}
-
-impl RkvmClient {
-    pub fn new() -> Result<Self,Error> {
-        unsafe {
-            let session_id = WTSGetActiveConsoleSessionId();
-
-            let mut user_token: HANDLE = HANDLE::default();
-            WTSQueryUserToken(session_id, &mut user_token)?;
-
-            
-            let mut needed = 0 as u32;
-            let _ = GetTokenInformation(user_token, TokenLinkedToken, None, 0, &mut needed);
-            let mut buffer = vec![0u8; needed as usize];
-            match GetTokenInformation(user_token, TokenLinkedToken, Some(buffer.as_mut_ptr() as *mut _), needed, &mut needed) {
-                Ok(_) => {
-                    let token_linked: &TOKEN_LINKED_TOKEN = &*(buffer.as_ptr() as *const TOKEN_LINKED_TOKEN);
-                    user_token = token_linked.LinkedToken
-                },
-                Err(e) => tracing::info!("Failed to get linked token {:?}", e)
-            };
-
-            let mut primary_token: HANDLE = HANDLE::default();
-            DuplicateTokenEx(user_token, TOKEN_ALL_ACCESS, None, SecurityImpersonation, TokenPrimary, &mut primary_token)?;
-
-            let mut si = STARTUPINFOW::default();
-            si.cb = std::mem::size_of::<STARTUPINFOW>() as u32;
-
-            let mut pi = PROCESS_INFORMATION::default();
-
-            let mut cmd: Vec<u16> = to_wide(format!("\"{}\" --log-file {} --pipe {}", CLIENT_PATH, CLIENT_LOG, SERVICE_PIPE).as_str());
-            CreateProcessAsUserW(Some(primary_token), PCWSTR::null(), Some(PWSTR(cmd.as_mut_ptr())), None, None, false, CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT, None, PCWSTR::null(), &si, &mut pi)?;
-
-            CloseHandle(pi.hThread)?;
-            CloseHandle(primary_token)?;
-            CloseHandle(user_token)?;
-            Ok(RkvmClient{ handle: pi.hProcess })
-        }
-    }
-}

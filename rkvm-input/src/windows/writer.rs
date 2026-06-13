@@ -6,6 +6,7 @@ use crate::rel::{RelAxis, RelEvent};
 
 use crate::windows::key_repeater::KeyRepeater;
 use crate::windows::normalizer::AxisNormalizer;
+use crate::windows::injector::send_input;
 
 use std::ffi::CString;
 use std::io::Error;
@@ -15,8 +16,6 @@ use std::time::Duration;
 use windows::Win32::UI::Input::KeyboardAndMouse::*;
 
 pub struct WriterWindows {
-    buffer: Vec<INPUT>,
-
     repeat_delay: Duration,
     repeat_period: Duration,
     key_reapeter: Option<KeyRepeater>,
@@ -27,30 +26,6 @@ pub struct WriterWindows {
 }
 
 impl WriterWindows {
-    pub fn push(&mut self, input: INPUT) {
-        self.buffer.push(input);
-    }
-
-    pub fn flush(&mut self) -> Result<(), Error> {
-        if self.buffer.is_empty() {
-            return Ok(());
-        }
-
-        unsafe {
-            let sent = SendInput(
-                self.buffer.as_slice(),
-                size_of::<INPUT>() as i32,
-            );
-
-            if sent == 0 {
-                tracing::error!("SendInput failed: {:?}", Error::last_os_error());
-            }
-        }
-
-        self.buffer.clear();
-        Ok(())
-    }
-    
     pub fn key(&mut self, key: &Keyboard, down:&bool) {
         if let Some((scan, extended)) = map_key_to_scancode(key) {
             let mut flags = KEYEVENTF_SCANCODE;
@@ -67,7 +42,7 @@ impl WriterWindows {
                 (_,_) => {}
             }
 
-            self.push(INPUT {
+            send_input(INPUT {
                 r#type: INPUT_KEYBOARD,
                 Anonymous: INPUT_0 {
                     ki: KEYBDINPUT {
@@ -84,7 +59,7 @@ impl WriterWindows {
 
     fn button(&mut self, button: &Button, down:&bool) {
         if let Some((flags, mousedata)) = map_button(button, down) {
-            self.push(INPUT {
+            send_input(INPUT {
                 r#type: INPUT_MOUSE,
                 Anonymous: INPUT_0 {
                     mi: MOUSEINPUT {
@@ -105,7 +80,7 @@ impl WriterWindows {
         if abs {
             flags |= MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK;
         }
-        self.push(INPUT {
+        send_input(INPUT {
             r#type: INPUT_MOUSE,
             Anonymous: INPUT_0 {
                 mi: MOUSEINPUT {
@@ -121,7 +96,7 @@ impl WriterWindows {
     }
 
     fn mouse_wheel(&mut self, delta: i32) {
-         self.push(INPUT {
+         send_input(INPUT {
             r#type: INPUT_MOUSE,
             Anonymous: INPUT_0 {
                 mi: MOUSEINPUT {
@@ -137,7 +112,7 @@ impl WriterWindows {
     }
 
       fn mouse_hwheel(&mut self, delta: i32) {
-         self.push(INPUT {
+         send_input(INPUT {
             r#type: INPUT_MOUSE,
             Anonymous: INPUT_0 {
                 mi: MOUSEINPUT {
@@ -203,7 +178,7 @@ impl WriterPlatform for WriterWindows {
                     _ => tracing::warn!("Abs event not handled: {:?}", event),
                 }
             }
-            Event::Sync(_) => self.flush()?
+            _ => {}
         }
 
         Ok(())
@@ -289,7 +264,6 @@ impl WriterBuilderPlatform for WriterWindowsBuilder {
 
     async fn build(self) -> Result<Self::Writer, Error> {
         Ok(WriterWindows{
-            buffer: Vec::with_capacity(16),
             hi_wheel: self.hi_wheel,
             hi_hwheel: self.hi_hwheel,
             abs_norm: self.abs_norm,

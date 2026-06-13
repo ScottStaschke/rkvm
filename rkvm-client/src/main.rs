@@ -83,9 +83,9 @@ async fn main() -> ExitCode {
         client::handler(&mut writers.borrow_mut(), update).await
     };
 
-    let (r,w) = split(stream);
+    let (mut r, mut w) = split(stream);
     tokio::select! {
-        result = client::run(r, w, update) => {
+        result = client::run(&mut r, &mut w, update) => {
             if let Err(err) = result {
                 tracing::error!("Error: {}", err);
                 return ExitCode::FAILURE;
@@ -104,3 +104,4 @@ async fn main() -> ExitCode {
 
     ExitCode::SUCCESS
 }
+

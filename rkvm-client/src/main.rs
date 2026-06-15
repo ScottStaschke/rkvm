@@ -5,7 +5,7 @@ mod tls;
 
 use clap::Parser;
 use client::{Error, init_tracing, init_config};
-use rkvm_input::writer::Writer;
+use rkvm_input::writer::{DeviceWriter, Writer};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -20,7 +20,8 @@ use tokio::time::{Duration, sleep};
 use tokio::net::windows::named_pipe::ClientOptions;
 #[cfg(target_os="windows")]
 use windows_sys::Win32::Foundation::ERROR_PIPE_BUSY;
-
+#[cfg(target_os="windows")]
+use rkvm_input::windows::{writer::WritersWindows, writer_simple::WriterWindowsSimple};
 
 #[derive(Parser)]
 #[structopt(name = "rkvm-client", about = "The rkvm client application")]
@@ -36,22 +37,22 @@ struct Args {
     pipe: bool,
 }
 
-async fn process_args_default(args: Args) -> Result<RkvmStream,Error> {
+async fn process_args_default(args: &Args) -> Result<RkvmStream,Error> {
     let config = init_config(&args.config_path).await?;
     let connector = tls::configure(&config.certificate).await?;
     client::init_stream(&config.server.hostname, config.server.port, &connector, &config.password).await
 }
 #[cfg(not(target_os="windows"))]
-async fn process_args(args: Args) -> Result<RkvmStream,Error> {
+async fn process_args(args: &Args) -> Result<RkvmStream,Error> {
     process_args_default(args).await
 }
 
 #[cfg(target_os="windows")]
-async fn process_args(args: Args) -> Result<RkvmStream,Error> {
+async fn process_args(args: &Args) -> Result<RkvmStream,Error> {
     if args.pipe {
         tracing::info!("pipe mode {:?}", args.config_path);
         let pipe = loop {
-            match ClientOptions::new().open(&args.config_path) {
+            match ClientOptions::new().open(args.config_path.clone()) {
                 Ok(client) => break client,
                 Err(e) if e.raw_os_error() == Some(ERROR_PIPE_BUSY as i32) => (),
                 Err(e) => return Err(Error::Io(e)),
@@ -65,12 +66,21 @@ async fn process_args(args: Args) -> Result<RkvmStream,Error> {
     }
 }
 
+#[cfg(target_os="windows")]
+fn init_device_writer(args: &Args) -> Box<dyn DeviceWriter + Send> {
+    if args.pipe {
+        Box::new(WriterWindowsSimple::new())
+    }else{
+        Box::new(WritersWindows::new(WriterWindowsSimple::new()))
+    }
+}
+
 #[tokio::main]
 async fn main() -> ExitCode {
     let args = Args::parse();
     init_tracing(&args.log_level, &args.log_file);
 
-    let stream = match process_args(args).await {
+    let stream = match process_args(&args).await {
         Ok(stream) => stream,
         Err(e) => {
             tracing::error!("Failed to open stream {}", e);
@@ -78,10 +88,7 @@ async fn main() -> ExitCode {
         }
     };
 
-    let writers = Rc::new(RefCell::new(HashMap::<usize, Writer>::new()));
-    let update = |update| async {
-        client::handler(&mut writers.borrow_mut(), update).await
-    };
+    let update = init_device_writer(&args);
 
     let (mut r, mut w) = split(stream);
     tokio::select! {

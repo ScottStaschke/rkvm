@@ -2,13 +2,14 @@ use crate::client::Error;
 
 use async_trait::async_trait;
 use rkvm_net::{Update, message::Message};
-use std::pin::Pin;
+use std::future::Future;
 use std::io;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, BufStream};
 use tokio::net::TcpStream;
-use tokio::sync::{Mutex, mpsc::Sender};
+use tokio::sync::{Mutex, MutexGuard, mpsc::Sender};
 use tokio_rustls::client::TlsStream;
 
 #[cfg(target_os = "windows")]
@@ -121,8 +122,12 @@ pub struct LockWriter<W> {
 }
 
 impl<W> LockWriter<W>  {
-    pub fn new(w: Arc<Mutex<W>>) -> Self {
-        LockWriter { w: w }
+    pub fn new(w: W) -> Self {
+        LockWriter { w: Arc::new(Mutex::new(w)) }
+    }
+
+    pub async fn lock(self: &Self) -> MutexGuard<'_, W> {
+        self.w.lock().await
     }
 }
 
@@ -130,7 +135,15 @@ impl<W> LockWriter<W>  {
 impl<W> RkvmWriter for LockWriter<W>
 where
     W: RkvmWriter + Send {
-    async fn send(&mut self, update: Update) -> Result<(), Error> {
+    async fn send(self: &mut Self, update: Update) -> Result<(), Error> {
         self.w.lock().await.send(update).await
+    }
+}
+
+impl<W> Clone for LockWriter<W>
+where
+    W: RkvmWriter + Send {
+    fn clone(self: &Self) -> Self {
+        LockWriter { w: self.w.clone() }
     }
 }

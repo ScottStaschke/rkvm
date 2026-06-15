@@ -10,7 +10,7 @@ use windows::{
     }
 };
 
-static TX:Sender<INPUT> = create()
+static TX:LazyLock<Sender<INPUT>> = LazyLock::new(|| create());
 
 pub fn send_input(input:INPUT) {
     TX.send(input).unwrap()

@@ -1,7 +1,7 @@
 use crate::config::Config;
 use crate::stream::{RkvmStream, RkvmWriter};
 
-use rkvm_input::writer::{Writer,WriterPlatform,WriterBuilderPlatform};
+use rkvm_input::writer::{DeviceWriter, Writer,WriterPlatform,WriterBuilderPlatform};
 use rkvm_net::auth::{AuthChallenge, AuthStatus};
 use rkvm_net::message::Message;
 use rkvm_net::version::Version;
@@ -138,7 +138,7 @@ pub async fn run<R,W,H>(reader: &mut R, writer: &mut W, mut handler: H) -> Resul
     where
         R: AsyncRead + Send + Unpin,
         W: RkvmWriter + Send,
-        H: AsyncFnMut(Update) -> Result<(), Error>, {
+        H: DeviceWriter {
 
     let mut start = Instant::now();
 
@@ -154,29 +154,39 @@ pub async fn run<R,W,H>(reader: &mut R, writer: &mut W, mut handler: H) -> Resul
         tracing::debug!(duration = ?duration, "received {:?}", update);
         start = Instant::now();
 
-        if let Update::Ping = &update {
-            writer.send(Update::Pong).await?;
-            let duration = start.elapsed();
-            tracing::debug!(duration = ?duration, "Sent pong");
+        match update {
+            Update::CreateDevice { id,name,vendor,product,version,rel,abs,keys,delay,period,} => {
+                handler.create_device(id, &name, vendor, product, version, rel, abs, keys, delay, period).await?;
+                tracing::info!(
+                    id = %id,
+                    name = ?name,
+                    vendor = %vendor,
+                    product = %product,
+                    version = %version,
+                    "Created new device"
+                );
+            }
+            Update::DestroyDevice { id } => {
+                handler.destroy_device(id).await?;
+                tracing::info!(id = %id, "Destroyed device");
+            }
+            Update::Event { id, event } => {
+                handler.event(id, event).await?;
+                tracing::trace!(id = %id, "Wrote an event to device");
+            }
+            Update::Ping => {
+                writer.send(Update::Pong).await?;
+                let duration = start.elapsed();
+                tracing::debug!(duration = ?duration, "Sent pong");
+            }
+            _ => {}
         }
-        handler(update).await?
     }
 }
 
 pub async fn handler(writers: &mut HashMap<usize,Writer>, update: Update) -> Result<(), Error> {
     match update {
-        Update::CreateDevice {
-            id,
-            name,
-            vendor,
-            product,
-            version,
-            rel,
-            abs,
-            keys,
-            delay,
-            period,
-        } => {
+        Update::CreateDevice { id,name,vendor,product,version,rel,abs,keys,delay,period,} => {
             let entry = writers.entry(id);
             if let Entry::Occupied(_) = entry {
                 return Err(Error::Network(io::Error::new(

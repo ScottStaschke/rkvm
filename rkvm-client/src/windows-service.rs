@@ -6,9 +6,10 @@ mod tls;
 mod windows_daemon;
 
 use crate::stream::{RkvmWriter, LockWriter};
-use crate::windows_daemon::client_process::ClientProcess;
+use crate::windows_daemon::{writer::ClientWriter, client_process::ClientProcess};
 
 use client::{init_tracing, init_config, Error};
+use rkvm_input::windows::writer::WritersWindows;
 use rkvm_net::Update;
 use std::io::ErrorKind;
 use std::ffi::{OsString, CStr, c_void};
@@ -124,33 +125,22 @@ fn run_service() -> windows_service::Result<()> {
 async fn process(stop_notify: Arc<Notify>) -> Result<(), Error> {
     tracing::info!("Service started");
 
-    let pipe = new_pipe()?;
-    let connect = pipe.connect();
-
-    let mut cmd: Vec<u16> = to_wide(format!("\"{}\" --log-file {} --pipe {}", CLIENT_PATH, CLIENT_LOG, SERVICE_PIPE).as_str());
-    let _guard = ClientProcess::new(cmd);
-    connect.await?;
-
-    let (pipe_r, pipe_w) = split(pipe);
+    let mut cl:ClientProcess = ClientProcess::new().await?;
 
     let config = init_config(SERVICE_CFG).await?;
     let connector = tls::configure(&config.certificate).await?;
     let stream = client::init_stream(&config.server.hostname, config.server.port, &connector, &config.password).await?;
     let (mut stream_r, mut stream_w) = split(stream);
 
-    let pw = Arc::new(Mutex::new(pipe_w));
-    let pipe_w = LockWriter::new(pw.clone());
-    let srv_update = |update| async {
-        tracing::debug!("Forward {:?}", update);
-        pw.lock().await.send(update).await
-    };
+    let srv_update = WritersWindows::new(ClientWriter::new(cl.writer()));
 
+    let ping_w = cl.writer();
     let span_server = tracing::info_span!("run", stream="server");
     let span_client = tracing::info_span!("run", stream="client");
     tokio::select! {
         res = client::run(&mut stream_r, &mut stream_w, srv_update).instrument(span_server) => res,
-        res = run_client(pipe_r, pipe_w).instrument(span_client) => res,
-        res = ping_sender(pw.clone()) => res,
+        res = cl.run().instrument(span_client) => res,
+        res = ping_sender(ping_w) => res,
         _ = stop_notify.notified() => {
             tracing::info!("Service requested stop");
             Ok(())
@@ -159,68 +149,11 @@ async fn process(stop_notify: Arc<Notify>) -> Result<(), Error> {
     Ok(())
 }
 
-async fn ping_sender(pw: Arc<Mutex<WriteHalf<NamedPipeServer>>>) -> Result<(),Error> {
+async fn ping_sender(mut w: LockWriter<WriteHalf<NamedPipeServer>>) -> Result<(),Error> {
     let mut interval = interval(rkvm_net::PING_INTERVAL);
     interval.tick().await;
     loop {
         interval.tick().await;
-        pw.lock().await.send(Update::Ping).await?
+        w.send(Update::Ping).await?
     }
 }
-
-async fn run_client(mut reader: ReadHalf<NamedPipeServer>, mut writer: LockWriter<WriteHalf<NamedPipeServer>>) -> Result<(), Error> {
-    let client_update = |update| async move {
-        // handle missing communication
-        tracing::debug!("client respond {:?}", update);
-        Ok(())
-    };
-    loop {
-        let res = client::run(&mut reader, &mut writer, client_update).await;
-        if let Err(ref e) = res {
-            tracing::info!("Client error: {:?}", e);
-            match e {
-                Error::Network(ref io) => {
-                    if io.kind() == ErrorKind::UnexpectedEof {
-                        continue;
-                    }
-                }
-                _ => {}
-            }
-        }
-        return res;
-    }
-}
-
-fn new_pipe() -> Result<NamedPipeServer, Error> {
-    unsafe {
-        let sddl = to_wide("D:(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;AU)");
-
-        let mut security_descriptor: PSECURITY_DESCRIPTOR = PSECURITY_DESCRIPTOR(null_mut());
-
-        ConvertStringSecurityDescriptorToSecurityDescriptorW(
-            PCWSTR(sddl.as_ptr()),
-            SDDL_REVISION_1,
-            &mut security_descriptor,
-            None
-        )?;
-        tracing::info!("Created descriptor");
-
-        let mut sa = SECURITY_ATTRIBUTES {
-            nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
-            lpSecurityDescriptor: security_descriptor.0,
-            bInheritHandle: false.into(),
-        };
-        tracing::info!("Created security attributes");
-        
-        let pipe=ServerOptions::new().first_pipe_instance(true).write_dac(true).create_with_security_attributes_raw(SERVICE_PIPE, addr_of_mut!(sa) as *mut c_void)?;
-        tracing::info!("Created pipe");
-
-        Ok(pipe)
-    }
-}
-
-fn to_wide(s: &str) -> Vec<u16> {
-    s.encode_utf16().chain(std::iter::once(0)).collect()
-}
-
-

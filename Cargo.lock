@@ -873,6 +873,7 @@ dependencies = [
 name = "rkvm-input"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "bindgen",
  "cc",
  "futures",

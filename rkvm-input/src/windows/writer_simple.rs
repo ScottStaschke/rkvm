@@ -1,18 +1,15 @@
-use crate::writer::{DeviceWriter, EventWriter, WriterPlatform,WriterBuilderPlatform};
+use crate::writer::{DeviceWriter, EventWriter};
 use crate::abs::{AbsAxis, AbsInfo, AbsEvent};
 use crate::event::Event;
 use crate::key::{Key, KeyEvent,Keyboard, Button};
 use crate::rel::{RelAxis, RelEvent};
 
-use crate::windows::key_repeater::KeyRepeater;
-use crate::windows::normalizer::AxisNormalizer;
 use crate::windows::injector::send_input;
 
 use async_trait::async_trait;
 use std::ffi::CString;
 use std::io::Error;
 use std::collections::{HashMap, HashSet};
-use std::time::Duration;
 
 use windows::Win32::UI::Input::KeyboardAndMouse::*;
 
@@ -21,7 +18,7 @@ pub struct WriterWindowsSimple {
 
 impl WriterWindowsSimple {
     pub fn new() -> Self {
-        WriterWindowsSimple{}
+        WriterWindowsSimple {}
     }
 }
 
@@ -75,7 +72,7 @@ impl EventWriter for WriterWindowsSimple {
     }
 }
 
-fn send_key(key: Keyboard, down: bool) {
+pub fn send_key(key: Keyboard, down: bool) {
     if let Some((scan, extended)) = map_key_to_scancode(key) {
         let mut flags = KEYEVENTF_SCANCODE;
         if !down { flags |= KEYEVENTF_KEYUP; }

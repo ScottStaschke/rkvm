@@ -6,11 +6,8 @@ use crate::rel::RelAxis;
 use async_trait::async_trait;
 use std::collections::{HashMap, HashSet};
 use std::ffi::CString;
-use std::future::Future;
 use std::io::Error;
 
-#[cfg(target_os = "windows")]
-pub use {crate::windows::writer::WriterWindows as Writer, crate::windows::writer::WriterWindowsBuilder as WriterBuilder};
 #[cfg(target_os = "linux")]
 pub use {crate::linux::writer::WriterLinux as Writer, crate::linux::writer::WriterLinuxBuilder as WriterBuilder};
 

@@ -1,18 +1,11 @@
-use rkvm_net::Update;
 use rkvm_input::windows::writer_simple::WriterWindowsSimple;
 use crate::client::{self, Error};
 use crate::stream::LockWriter;
-use std::ffi::{OsString, CStr, c_void};
+use std::ffi::{CStr, c_void};
 use std::io::ErrorKind;
-use std::path::PathBuf;
 use std::ptr::{addr_of_mut, null_mut};
-use std::sync::{Arc, LazyLock};
-use std::time::Duration;
 use tokio::io::{ReadHalf, WriteHalf, split};
 use tokio::net::windows::named_pipe::{ServerOptions, NamedPipeServer};
-use tokio::sync::{Mutex, Notify};
-use tokio::time::interval;
-use tracing::Instrument;
 use windows::core::{PCWSTR, PWSTR};
 use windows::Win32::Foundation::{CloseHandle, HANDLE};
 use windows::Win32::Security::{DuplicateTokenEx, GetTokenInformation, SecurityImpersonation, TokenLinkedToken, TokenPrimary, PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES, TOKEN_ALL_ACCESS, TOKEN_ASSIGN_PRIMARY, TOKEN_LINKED_TOKEN};
@@ -20,9 +13,6 @@ use windows::Win32::Security::Authorization::{ConvertStringSecurityDescriptorToS
 use windows::Win32::System::Diagnostics::ToolHelp::{CreateToolhelp32Snapshot, Process32First, Process32Next, PROCESSENTRY32, TH32CS_SNAPPROCESS};
 use windows::Win32::System::RemoteDesktop::{ProcessIdToSessionId, WTSGetActiveConsoleSessionId, WTSQueryUserToken};
 use windows::Win32::System::Threading::{CreateProcessAsUserW, OpenProcess, OpenProcessToken, TerminateProcess, CREATE_NO_WINDOW, CREATE_UNICODE_ENVIRONMENT, PROCESS_ALL_ACCESS, PROCESS_INFORMATION, STARTUPINFOW};
-use windows_service::{define_windows_service, service_dispatcher};
-use windows_service::service::{ServiceControl, ServiceControlAccept, ServiceExitCode, ServiceState, ServiceStatus,ServiceType};
-use windows_service::service_control_handler::{register, ServiceControlHandlerResult};
 
 const SERVICE_PIPE: &str = r"\\.\pipe\rkvm";
 const CLIENT_PATH: &str = r"C:\ProgramData\rkvm\rkvm-client.exe";
@@ -112,7 +102,7 @@ fn launch_client() -> Result<HANDLE,Error> {
         si.cb = std::mem::size_of::<STARTUPINFOW>() as u32;
 
         let mut pi = PROCESS_INFORMATION::default();
-        let mut cmd = to_wide(format!("\"{}\" --log-file {} --pipe {}", CLIENT_PATH, CLIENT_LOG, SERVICE_PIPE).as_str());
+        let mut cmd = to_wide(format!("\"{}\" --log-file {} {}", CLIENT_PATH, CLIENT_LOG, SERVICE_PIPE).as_str());
         CreateProcessAsUserW(Some(primary_token), PCWSTR::null(), Some(PWSTR(cmd.as_mut_ptr())), Some(&sa), None, false, CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT, None, PCWSTR::null(), &si, &mut pi)?;
 
         let _ = CloseHandle(pi.hThread);
@@ -206,7 +196,7 @@ impl ClientProcess {
         }
     }
 
-    async fn restart(self: &mut Self) -> Result<(),Error> {
+    pub async fn restart(self: &mut Self) -> Result<(),Error> {
         let mut w = self.writer.lock().await;
         self.stop();
         let pipe = new_pipe(false)?;

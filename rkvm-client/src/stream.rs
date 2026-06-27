@@ -2,7 +2,6 @@ use crate::client::Error;
 
 use async_trait::async_trait;
 use rkvm_net::{Update, message::Message};
-use std::future::Future;
 use std::io;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -12,13 +11,13 @@ use tokio::net::TcpStream;
 use tokio::sync::{Mutex, MutexGuard, mpsc::Sender};
 use tokio_rustls::client::TlsStream;
 
-#[cfg(target_os = "windows")]
+#[cfg(feature = "windows-service")]
 use tokio::net::windows::named_pipe::NamedPipeClient;
 
 pub enum RkvmStream {
     Tcp(BufStream<TlsStream<TcpStream>>),
 
-    #[cfg(target_os = "windows")]
+    #[cfg(feature = "windows-service")]
     Pipe(BufStream<NamedPipeClient>),
 }
 
@@ -33,7 +32,7 @@ impl AsyncRead for RkvmStream {
             RkvmStream::Tcp(stream) =>
                 Pin::new(stream).poll_read(cx, buf),
 
-            #[cfg(target_os = "windows")]
+            #[cfg(feature = "windows-service")]
             RkvmStream::Pipe(stream) =>
                 Pin::new(stream).poll_read(cx, buf),
         }
@@ -51,7 +50,7 @@ impl AsyncWrite for RkvmStream {
             RkvmStream::Tcp(stream) =>
                 Pin::new(stream).poll_write(cx, buf),
 
-            #[cfg(target_os = "windows")]
+            #[cfg(feature = "windows-service")]
             RkvmStream::Pipe(stream) =>
                 Pin::new(stream).poll_write(cx, buf),
         }
@@ -66,7 +65,7 @@ impl AsyncWrite for RkvmStream {
             RkvmStream::Tcp(stream) =>
                 Pin::new(stream).poll_flush(cx),
 
-            #[cfg(target_os = "windows")]
+            #[cfg(feature = "windows-service")]
             RkvmStream::Pipe(stream) =>
                 Pin::new(stream).poll_flush(cx),
         }
@@ -81,7 +80,7 @@ impl AsyncWrite for RkvmStream {
             RkvmStream::Tcp(stream) =>
                 Pin::new(stream).poll_shutdown(cx),
 
-            #[cfg(target_os = "windows")]
+            #[cfg(feature = "windows-service")]
             RkvmStream::Pipe(stream) =>
                 Pin::new(stream).poll_shutdown(cx),
         }

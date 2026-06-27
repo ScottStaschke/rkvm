@@ -11,24 +11,16 @@ use crate::windows_daemon::{writer::ClientWriter, client_process::ClientProcess}
 use client::{init_tracing, init_config, Error};
 use rkvm_input::windows::writer::WritersWindows;
 use rkvm_net::Update;
-use std::io::ErrorKind;
-use std::ffi::{OsString, CStr, c_void};
+use std::ffi::OsString;
 use std::path::PathBuf;
-use std::ptr::{addr_of_mut, null_mut};
+use std::io;
 use std::sync::Arc;
+use tokio::sync::mpsc::{channel, Receiver};
 use std::time::Duration;
-use tokio::io::{ReadHalf, WriteHalf, split};
-use tokio::net::windows::named_pipe::{ServerOptions, NamedPipeServer};
-use tokio::sync::{Mutex, Notify};
-use tokio::time::interval;
+use tokio::io::{WriteHalf, split};
+use tokio::net::windows::named_pipe::NamedPipeServer;
+use tokio::time::{interval, sleep};
 use tracing::Instrument;
-use windows::Win32::Foundation::{CloseHandle, HANDLE};
-use windows::Win32::Security::{SECURITY_ATTRIBUTES, GetTokenInformation, TokenLinkedToken, TOKEN_ALL_ACCESS, TOKEN_LINKED_TOKEN, PSECURITY_DESCRIPTOR};
-use windows::Win32::Security::Authorization::{ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1};
-use windows::Win32::System::Diagnostics::ToolHelp::{CreateToolhelp32Snapshot, TH32CS_SNAPPROCESS, PROCESSENTRY32, Process32First, Process32Next };
-use windows::Win32::System::RemoteDesktop::{WTSGetActiveConsoleSessionId, WTSQueryUserToken, ProcessIdToSessionId};
-use windows::Win32::System::Threading::{OpenProcess, OpenProcessToken, PROCESS_ALL_ACCESS};
-use windows::core::{PCWSTR};
 use windows_service::define_windows_service;
 use windows_service::service::{ServiceControl, ServiceControlAccept, ServiceExitCode, ServiceState, ServiceStatus,ServiceType};
 use windows_service::service_control_handler::{register, ServiceControlHandlerResult};
@@ -36,11 +28,13 @@ use windows_service::service_dispatcher;
 
 const SERVICE_NAME: &str = "RkvmService";
 const SERVICE_TYPE: ServiceType = ServiceType::OWN_PROCESS;
-const SERVICE_LOG: &str = r"C:\ProgramData\rkvm\service.log";
+const SERVICE_LOG: &str = r"C:\ProgramData\rkvm\rkvm-service.log";
 const SERVICE_CFG: &str = r"C:\ProgramData\rkvm\client.toml";
-const SERVICE_PIPE: &str = r"\\.\pipe\rkvm";
-const CLIENT_PATH: &str = r"C:\ProgramData\rkvm\rkvm-client.exe";
-const CLIENT_LOG: &str = r"C:\ProgramData\rkvm\client.log";
+
+enum ServiceEvent {
+    Stop,
+    Restart,
+}
 
 define_windows_service!(ffi_service_main, service_main);
 
@@ -51,27 +45,27 @@ fn main() -> windows_service::Result<()> {
 
 fn service_main(_arguments: Vec<OsString>) {
     init_tracing(&"info".to_string(), &Some(PathBuf::from(SERVICE_LOG)));
+    tracing::info!("Starting service");
     if let Err(e) = run_service() {
+        let _ = std::fs::write(r"C:\Windows\Temp\rkvm-service.log", format!("Service error: {e:#?}"));
         tracing::error!("Service error: {:?}", e);
     }
 }
 
 fn run_service() -> windows_service::Result<()> {
-    let stop_notify = Arc::new(Notify::new());
-    let stop_clone = stop_notify.clone();
+    let (tx, rx) = channel(4);
     let event_handler = move |control_event| -> ServiceControlHandlerResult {
         match control_event {
             ServiceControl::Stop => {
                 tracing::info!("Service stop requested");
-                stop_clone.notify_waiters();
+                let _ = tx.try_send(ServiceEvent::Stop);
                 ServiceControlHandlerResult::NoError
             }
-
             ServiceControl::SessionChange(change) => {
                 tracing::info!("Session change: {:?}", change);
+                let _ = tx.try_send(ServiceEvent::Restart);
                 ServiceControlHandlerResult::NoError
             }
-
             _ => ServiceControlHandlerResult::NotImplemented,
         }
     };
@@ -83,15 +77,18 @@ fn run_service() -> windows_service::Result<()> {
         current_state: ServiceState::Running,
         controls_accepted: ServiceControlAccept::STOP
             | ServiceControlAccept::SESSION_CHANGE,
-        exit_code: ServiceExitCode::Win32(0),
+        exit_code: ServiceExitCode::NO_ERROR,
         checkpoint: 0,
         wait_hint: Duration::default(),
         process_id: None,
     };
-    status_handle.set_service_status(status)?;
+    if let Err(e) = status_handle.set_service_status(status) {
+        tracing::error!("Failed to start service {:?}", e);
+        return Err(e);
+    }
 
     let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
-    match rt.block_on(process(stop_notify.clone())) {
+    match rt.block_on(process_loop(rx)) {
           Ok(_) => {
             tracing::info!("Service stopped normally");
 
@@ -121,8 +118,20 @@ fn run_service() -> windows_service::Result<()> {
     }
     Ok(())
 }
+async fn process_loop(mut rx: Receiver<ServiceEvent>) -> Result<(), Error> {
+    loop {
+        match process(&mut rx).await {
+            Ok(_) => break Ok(()),
+            Err(e) => {
+                tracing::error!(?e, "run_once crashed, restarting");
+            }
+        }
 
-async fn process(stop_notify: Arc<Notify>) -> Result<(), Error> {
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    }
+}
+
+async fn process(rx: &mut Receiver<ServiceEvent>) -> Result<(), Error> {
     tracing::info!("Service started");
 
     let mut cl:ClientProcess = ClientProcess::new().await?;
@@ -135,18 +144,29 @@ async fn process(stop_notify: Arc<Notify>) -> Result<(), Error> {
     let srv_update = WritersWindows::new(ClientWriter::new(cl.writer()));
 
     let ping_w = cl.writer();
+    let mut restart_w = cl.writer();
     let span_server = tracing::info_span!("run", stream="server");
     let span_client = tracing::info_span!("run", stream="client");
     tokio::select! {
         res = client::run(&mut stream_r, &mut stream_w, srv_update).instrument(span_server) => res,
         res = cl.run().instrument(span_client) => res,
         res = ping_sender(ping_w) => res,
-        _ = stop_notify.notified() => {
-            tracing::info!("Service requested stop");
-            Ok(())
-        }
-    }?;
-    Ok(())
+        _ = async {
+            loop {
+                match rx.recv().await {
+                    Some(ServiceEvent::Stop) => {
+                        tracing::info!("Service requested stop");
+                        break ();
+                    }
+                    Some(ServiceEvent::Restart) => {
+                        tracing::info!("Service restarting");
+                        let _ = restart_w.send(Update::Stop);
+                    }
+                    _ => {}
+                }
+            }
+        } => Ok(())
+    }
 }
 
 async fn ping_sender(mut w: LockWriter<WriteHalf<NamedPipeServer>>) -> Result<(),Error> {

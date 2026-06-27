@@ -1,12 +1,10 @@
 use rkvm_input::{event::Event, writer::EventWriter};
 use rkvm_net::Update;
 
-use crate::stream::{RkvmWriter, LockWriter};
+use crate::stream::RkvmWriter;
 
 use async_trait::async_trait;
 use std::io::Error;
-use tokio::io::WriteHalf;
-use tokio::net::windows::named_pipe::NamedPipeServer;
 
 pub struct ClientWriter<W> {
     writer: W,

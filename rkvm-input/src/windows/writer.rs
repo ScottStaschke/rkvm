@@ -18,7 +18,6 @@ use tokio::sync::mpsc::{channel, Sender};
 
 pub struct WritersWindows {
     tx: Sender<(usize,Event)>,
-    consumer: JoinHandle<()>,
     dev: HashMap<usize,DeviceWriterWindows>,
 }
 
@@ -35,21 +34,14 @@ struct DeviceWriterWindows {
 impl WritersWindows {
     pub fn new(mut writer: impl EventWriter + Send +'static) -> Self {
         let (tx, mut rx) = channel(16);
-        let consumer = tokio::spawn(async move {
-            loop {
-                if let Some((id, event)) = rx.recv().await {
-                    if let Err(e) = writer.event(id, event).await {
-                        tracing::warn!("Failed to write event {:?}", e);
-                    }
+        tokio::spawn(async move {
+            while let Some((id, event)) = rx.recv().await {
+                if let Err(e) = writer.event(id, event).await {
+                    tracing::warn!("Failed to write event {:?}", e);
                 }
             }
         });
-        WritersWindows { tx: tx, consumer: consumer, dev: HashMap::new() }
-    }
-}
-impl Drop for WritersWindows {
-    fn drop(&mut self) {
-        self.consumer.abort();
+        WritersWindows { tx: tx, dev: HashMap::new() }
     }
 }
 

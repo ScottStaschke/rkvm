@@ -7,7 +7,7 @@ use std::ptr::{addr_of_mut, null_mut};
 use tokio::io::{ReadHalf, WriteHalf, split};
 use tokio::net::windows::named_pipe::{ServerOptions, NamedPipeServer};
 use windows::core::{PCWSTR, PWSTR};
-use windows::Win32::Foundation::{CloseHandle, HANDLE};
+use windows::Win32::Foundation::{CloseHandle, LocalFree, HANDLE, HLOCAL};
 use windows::Win32::Security::{DuplicateTokenEx, GetTokenInformation, SecurityImpersonation, TokenLinkedToken, TokenPrimary, PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES, TOKEN_ALL_ACCESS, TOKEN_ASSIGN_PRIMARY, TOKEN_LINKED_TOKEN};
 use windows::Win32::Security::Authorization::{ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1};
 use windows::Win32::System::Diagnostics::ToolHelp::{CreateToolhelp32Snapshot, Process32First, Process32Next, PROCESSENTRY32, TH32CS_SNAPPROCESS};
@@ -123,19 +123,18 @@ fn new_pipe(first: bool) -> Result<NamedPipeServer, Error> {
             &mut security_descriptor,
             None
         )?;
-        tracing::info!("Created descriptor");
 
         let mut sa = SECURITY_ATTRIBUTES {
             nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
             lpSecurityDescriptor: security_descriptor.0,
             bInheritHandle: false.into(),
         };
-        tracing::info!("Created security attributes");
         
         let res = ServerOptions::new().first_pipe_instance(first).write_dac(true).create_with_security_attributes_raw(SERVICE_PIPE, addr_of_mut!(sa) as *mut c_void);
         if res.is_err() {
-                tracing::warn!("Failed to create pipe {:?}", res);
-            }
+            tracing::warn!("Failed to create pipe {:?}", res);
+        }
+        LocalFree(Some(HLOCAL(security_descriptor.0)));
         let pipe = res?;
         tracing::info!("Created pipe");
         Ok(pipe)

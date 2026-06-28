@@ -4,7 +4,7 @@ mod stream;
 mod tls;
 
 use clap::Parser;
-use client::{Error, init_tracing, init_config};
+use client::{Error, init_tracing};
 use std::path::PathBuf;
 use std::process::ExitCode;
 use stream::RkvmStream;
@@ -38,7 +38,7 @@ struct Args {
 
 #[cfg(any(not(target_os="windows"), not(feature="windows-service")))]
 async fn process_args(args: &Args) -> Result<RkvmStream,Error> {
-    let config = init_config(&args.config_path).await?;
+    let config = client::init_config(&args.config_path).await?;
     let connector = tls::configure(&config.certificate).await?;
     client::init_stream(&config.server.hostname, config.server.port, &connector, &config.password).await
 }

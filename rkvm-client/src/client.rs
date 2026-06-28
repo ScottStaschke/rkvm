@@ -46,7 +46,7 @@ pub fn init_tracing<P: AsRef<Path>>(log_level: &String, log_file: &Option<P>) {
     let filter = EnvFilter::new(log_level);
     if let Some(path) = log_file {
         let file = OpenOptions::new().create(true).append(true).open(path).unwrap();
-        let fmt_layer = fmt::layer().with_ansi(false).with_timer(LocalTime::rfc_3339()).with_writer(move || file.try_clone().unwrap());
+        let fmt_layer = fmt::layer().with_ansi(false).with_timer(LocalTime::rfc_3339()).with_writer(move || BufWriter::new(file.try_clone().unwrap()));
         let registry = Registry::default().with(filter).with(fmt_layer);
         tracing::subscriber::set_global_default(registry).unwrap();
     } else {

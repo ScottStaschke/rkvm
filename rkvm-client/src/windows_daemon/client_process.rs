@@ -35,12 +35,12 @@ unsafe fn winlogon_pid(session_id: u32) -> u32 {
     proc.dwSize = std::mem::size_of::<PROCESSENTRY32>() as u32;
     if let Err(e) = Process32First(handle, &mut proc) {
        tracing::warn!("Failed to get first process {:?}", e);
+       let _ = CloseHandle(handle);
        return 0;
     }
     let mut logon_sid:u32=0;
     let mut pid:u32=0;
     loop {
-        // TOOD compare proc.szExeFile
         let exe = CStr::from_ptr(proc.szExeFile.as_ptr()).to_string_lossy();
         if exe.eq_ignore_ascii_case("winlogon.exe") && ProcessIdToSessionId(proc.th32ProcessID, &mut logon_sid).is_ok() && logon_sid==session_id {
             pid=proc.th32ProcessID;

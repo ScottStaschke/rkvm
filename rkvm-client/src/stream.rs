@@ -11,13 +11,13 @@ use tokio::net::TcpStream;
 use tokio::sync::{Mutex, MutexGuard, mpsc::Sender};
 use tokio_rustls::client::TlsStream;
 
-#[cfg(feature = "windows-service")]
+#[cfg(target_os="windows")]
 use tokio::net::windows::named_pipe::NamedPipeClient;
 
 pub enum RkvmStream {
     Tcp(BufStream<TlsStream<TcpStream>>),
 
-    #[cfg(feature = "windows-service")]
+    #[cfg(target_os="windows")]
     Pipe(BufStream<NamedPipeClient>),
 }
 
@@ -32,7 +32,7 @@ impl AsyncRead for RkvmStream {
             RkvmStream::Tcp(stream) =>
                 Pin::new(stream).poll_read(cx, buf),
 
-            #[cfg(feature = "windows-service")]
+            #[cfg(target_os="windows")]
             RkvmStream::Pipe(stream) =>
                 Pin::new(stream).poll_read(cx, buf),
         }
@@ -50,7 +50,7 @@ impl AsyncWrite for RkvmStream {
             RkvmStream::Tcp(stream) =>
                 Pin::new(stream).poll_write(cx, buf),
 
-            #[cfg(feature = "windows-service")]
+            #[cfg(target_os="windows")]
             RkvmStream::Pipe(stream) =>
                 Pin::new(stream).poll_write(cx, buf),
         }
@@ -65,7 +65,7 @@ impl AsyncWrite for RkvmStream {
             RkvmStream::Tcp(stream) =>
                 Pin::new(stream).poll_flush(cx),
 
-            #[cfg(feature = "windows-service")]
+            #[cfg(target_os="windows")]
             RkvmStream::Pipe(stream) =>
                 Pin::new(stream).poll_flush(cx),
         }
@@ -80,7 +80,7 @@ impl AsyncWrite for RkvmStream {
             RkvmStream::Tcp(stream) =>
                 Pin::new(stream).poll_shutdown(cx),
 
-            #[cfg(feature = "windows-service")]
+            #[cfg(target_os="windows")]
             RkvmStream::Pipe(stream) =>
                 Pin::new(stream).poll_shutdown(cx),
         }

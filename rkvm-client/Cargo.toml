@@ -5,13 +5,9 @@ version = "0.6.1"
 authors = ["Jan Trefil <8711792+htrefil@users.noreply.github.com>"]
 edition = "2021"
 
-[features]
-windows-service = []
-
 [[bin]]
 name = "rkvm-service"
 path = "src/windows-service.rs"
-required-features = ["windows-service"]
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 

@@ -13,7 +13,6 @@ use std::collections::hash_map::Entry;
 use std::ffi::CString;
 use std::io::{Error, ErrorKind};
 use std::time::Duration;
-use tokio::task::JoinHandle;
 use tokio::sync::mpsc::{channel, Sender};
 
 pub struct WritersWindows {

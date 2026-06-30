@@ -1,18 +1,17 @@
-use crate::{Args, Error};
+use crate::client::Error;
 use rkvm_input::windows::writer_simple::WriterWindowsSimple;
-use crate::stream::RkvmStream;
 
-use std::marker::PhantomPinned;
-use std::pin::{Pin, pin};
+use std::path::PathBuf;
+use std::pin::Pin;
 use std::task::{Context, Poll};
-use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, BufStream};
+use tokio::io::{AsyncRead, AsyncWrite, BufStream};
 use tokio::net::windows::named_pipe::{ ClientOptions, NamedPipeClient };
 use tokio::time::{Duration, sleep};
 use windows_sys::Win32::Foundation::ERROR_PIPE_BUSY;
 
-pub async fn init_stream(args: &Args) -> Result<PipeStream,Error> {
+pub async fn stream(config_path: &PathBuf) -> Result<PipeStream,Error> {
     let pipe = loop {
-        match ClientOptions::new().open(args.config_path.clone())  {
+        match ClientOptions::new().open(config_path.clone())  {
             Ok(client) => break client,
             Err(e) if e.raw_os_error() == Some(ERROR_PIPE_BUSY as i32) => (),
             Err(e) => return Err(Error::Io(e)),
@@ -20,10 +19,11 @@ pub async fn init_stream(args: &Args) -> Result<PipeStream,Error> {
 
         sleep(Duration::from_millis(50)).await;
     };
+    tracing::info!("Pipe connected");
     Ok(PipeStream::new(pipe))
 }
 
-pub fn init_writers() -> WriterWindowsSimple {
+pub fn writers() -> WriterWindowsSimple {
     WriterWindowsSimple::new()
 }
 

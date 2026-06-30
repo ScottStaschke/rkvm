@@ -1,25 +1,21 @@
 ﻿mod client;
+mod init;
+#[cfg(any(target_os="linux",not(feature="windows-service")))]
+mod connection;
+#[cfg(any(target_os="linux",not(feature="windows-service")))]
 mod config;
-mod tls;
-mod stream;
-#[cfg(target_os="windows")]
-mod windows;
 
+use client::init_tracing;
 
 use clap::Parser;
-use client::{Error, init_tracing};
 use std::path::PathBuf;
 use std::process::ExitCode;
 use tokio::io::split;
 use tokio::signal;
 
-#[cfg(target_os="windows")]
-use windows::{init_stream, init_writers};
-
-
 #[derive(Parser)]
 #[structopt(name = "rkvm-client", about = "The rkvm client application")]
-pub struct Args {
+struct Args {
     #[clap(help = "Path to configuration file")]
     config_path: PathBuf,
     #[clap(long, default_value = "info", help = "log filter")]
@@ -28,20 +24,13 @@ pub struct Args {
     log_file: Option<PathBuf>,
 }
 
-#[cfg(not(target_os="windows"))]
-async fn process_args(args: &Args) -> Result<RkvmStream,Error> {
-    let config = client::init_config(&args.config_path).await?;
-    let connector = tls::configure(&config.certificate).await?;
-    client::init_stream(&config.server.hostname, config.server.port, &connector, &config.password).await
-}
-
 #[tokio::main]
 async fn main() -> ExitCode {
     let args = Args::parse();
     init_tracing(&args.log_level, &args.log_file);
 
     tracing::info!("Client starting...");
-    let stream = match init_stream(&args).await {
+    let stream = match init::stream(&args.config_path).await {
         Ok(stream) => stream,
         Err(e) => {
             tracing::error!("Failed to open stream {}", e);
@@ -49,7 +38,8 @@ async fn main() -> ExitCode {
         }
     };
 
-    let writers = init_writers();
+
+    let writers = init::writers();
 
     let (mut r, mut w) = split(stream);
     tokio::select! {

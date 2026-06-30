@@ -15,7 +15,7 @@ use std::io::{Error, ErrorKind};
 use std::time::Duration;
 use tokio::sync::mpsc::{channel, Sender};
 
-pub struct WritersWindows {
+pub struct WriterWindows {
     tx: Sender<(usize,Event)>,
     dev: HashMap<usize,DeviceWriterWindows>,
 }
@@ -30,7 +30,7 @@ struct DeviceWriterWindows {
     abs_norm: HashMap<AbsAxis, AxisNormalizer>,
 }
 
-impl WritersWindows {
+impl WriterWindows {
     pub fn new(mut writer: impl EventWriter + Send +'static) -> Self {
         let (tx, mut rx) = channel(16);
         tokio::spawn(async move {
@@ -40,7 +40,7 @@ impl WritersWindows {
                 }
             }
         });
-        WritersWindows { tx: tx, dev: HashMap::new() }
+        WriterWindows { tx: tx, dev: HashMap::new() }
     }
 }
 
@@ -108,7 +108,7 @@ impl DeviceWriterWindows {
 }
 
 #[async_trait]
-impl DeviceWriter for WritersWindows {
+impl DeviceWriter for WriterWindows {
     async fn create_device(&mut self, id: usize, _name: &CString, _vendor: u16, _product: u16, _version: u16, rel: HashSet<RelAxis>, abs: HashMap<AbsAxis, AbsInfo>, _keys: HashSet<Key>, delay: Option<i32>, period: Option<i32>) -> Result<(), Error> {
         let entry = self.dev.entry(id);
         if let Entry::Occupied(_) = entry {
@@ -158,7 +158,7 @@ impl DeviceWriter for WritersWindows {
 }
 
 #[async_trait]
-impl EventWriter for WritersWindows {
+impl EventWriter for WriterWindows {
     async fn event(&mut self, id: usize, event: Event) -> Result<(), Error> {
         let dev = self.dev.get_mut(&id).ok_or_else(|| { Error::new(ErrorKind::InvalidData,"Server sent an event to a nonexistent device",)})?;
         dev.event(self.tx.clone(), id, event).await

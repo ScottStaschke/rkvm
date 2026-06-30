@@ -1,6 +1,6 @@
 use rkvm_input::windows::writer_simple::WriterWindowsSimple;
 use crate::client::{self, Error};
-use crate::stream::LockWriter;
+use crate::LockWriter;
 use std::ffi::{CStr, c_void};
 use std::io::ErrorKind;
 use std::ptr::{addr_of_mut, null_mut};

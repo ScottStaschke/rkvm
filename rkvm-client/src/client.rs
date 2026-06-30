@@ -1,22 +1,17 @@
-use crate::config::Config;
-use crate::stream::{RkvmStream, RkvmWriter};
-
 use rkvm_input::writer::{DeviceWriter};
-use rkvm_net::auth::{AuthChallenge, AuthStatus};
 use rkvm_net::message::Message;
 use rkvm_net::version::Version;
 use rkvm_net::Update;
+
+use async_trait::async_trait;
 use std::fs::OpenOptions;
 use std::io::{self, stdout, BufWriter};
 use std::path::Path;
 use std::time::Instant;
 use thiserror::Error;
-use tokio::fs;
-use tokio::io::{AsyncRead, AsyncWriteExt, BufStream};
-use tokio::net::TcpStream;
+use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio::time;
-use tokio_rustls::rustls::{self, ServerName};
-use tokio_rustls::TlsConnector;
+use tokio_rustls::rustls;
 use tracing_subscriber::{fmt, Registry,EnvFilter};
 use tracing_subscriber::fmt::time::LocalTime;
 use tracing_subscriber::prelude::*;
@@ -36,8 +31,10 @@ pub enum Error {
     #[cfg(target_os="windows")]
     #[error("Windows API error: {0}")]
     Windows(#[from] core::Error),
+    #[allow(dead_code)]
     #[error("Incompatible server version (got {server}, expected {client})")]
     Version { server: Version, client: Version },
+    #[allow(dead_code)]
     #[error("Invalid password")]
     Auth,
 }
@@ -54,82 +51,6 @@ pub fn init_tracing<P: AsRef<Path>>(log_level: &String, log_file: &Option<P>) {
         let registry = Registry::default().with(filter).with(fmt_layer);
         tracing::subscriber::set_global_default(registry).unwrap();
     }
-}
-
-pub async fn init_config<P: AsRef<Path> + ?Sized> (path: &P) -> Result<Config,Error> {
-    let config = fs::read_to_string(path).await?;
-    let config = toml::from_str::<Config>(&config)?;
-    return Ok(config);
-    }
-
-pub async fn init_stream(hostname: &ServerName, port: u16, connector: &TlsConnector, password: &str) -> Result<RkvmStream,Error> {
-    // Intentionally don't impose any timeout for TCP connect.
-    let stream = match hostname {
-        ServerName::DnsName(name) => TcpStream::connect(&(name.as_ref(), port)).await,
-        ServerName::IpAddress(address) => TcpStream::connect(&(*address, port)).await,
-        _ => unimplemented!("Unhandled rustls ServerName variant: {:?}", hostname),
-    }
-    .map_err(Error::Network)?;
-
-    tracing::info!("Connected to server");
-
-    let stream = rkvm_net::timeout(
-        rkvm_net::TLS_TIMEOUT,
-        connector.connect(hostname.clone(), stream),
-    )
-    .await
-    .map_err(Error::Network)?;
-
-    tracing::info!("TLS connected");
-
-    let mut stream = BufStream::with_capacity(1024, 1024, stream);
-
-    rkvm_net::timeout(rkvm_net::WRITE_TIMEOUT, async {
-        Version::CURRENT.encode(&mut stream).await?;
-        stream.flush().await?;
-
-        Ok(())
-    })
-    .await
-    .map_err(Error::Network)?;
-
-    let version = rkvm_net::timeout(rkvm_net::READ_TIMEOUT, Version::decode(&mut stream))
-        .await
-        .map_err(Error::Network)?;
-
-    if version != Version::CURRENT {
-        return Err(Error::Version {
-            server: Version::CURRENT,
-            client: version,
-        });
-    }
-
-    let challenge = rkvm_net::timeout(rkvm_net::READ_TIMEOUT, AuthChallenge::decode(&mut stream))
-        .await
-        .map_err(Error::Network)?;
-
-    let response = challenge.respond(password);
-
-    rkvm_net::timeout(rkvm_net::WRITE_TIMEOUT, async {
-        response.encode(&mut stream).await?;
-        stream.flush().await?;
-
-        Ok(())
-    })
-    .await
-    .map_err(Error::Network)?;
-
-    let status = rkvm_net::timeout(rkvm_net::READ_TIMEOUT, AuthStatus::decode(&mut stream))
-        .await
-        .map_err(Error::Network)?;
-
-    match status {
-        AuthStatus::Passed => {}
-        AuthStatus::Failed => return Err(Error::Auth),
-    }
-
-    tracing::info!("Authenticated successfully");
-    Ok(RkvmStream::Tcp(stream))
 }
 
 pub async fn run<R,W,H>(reader: &mut R, writer: &mut W, mut handler: H) -> Result<(), Error> 
@@ -155,14 +76,7 @@ pub async fn run<R,W,H>(reader: &mut R, writer: &mut W, mut handler: H) -> Resul
         match update {
             Update::CreateDevice { id,name,vendor,product,version,rel,abs,keys,delay,period,} => {
                 handler.create_device(id, &name, vendor, product, version, rel, abs, keys, delay, period).await?;
-                tracing::info!(
-                    id = %id,
-                    name = ?name,
-                    vendor = %vendor,
-                    product = %product,
-                    version = %version,
-                    "Created new device"
-                );
+                tracing::info!(id = %id, name = ?name, vendor = %vendor, product = %product, version = %version, "Created new device");
             }
             Update::DestroyDevice { id } => {
                 handler.destroy_device(id).await?;
@@ -177,11 +91,28 @@ pub async fn run<R,W,H>(reader: &mut R, writer: &mut W, mut handler: H) -> Resul
                 let duration = start.elapsed();
                 tracing::debug!(duration = ?duration, "Sent pong");
             }
+            Update::Pong => {}
             Update::Stop => {
                 tracing::info!("Stoping..");
                 return Ok(());
             }
-            _ => {}
         }
+    }
+}
+
+#[async_trait]
+pub trait RkvmWriter {
+    async fn send(&mut self, update: Update) -> Result<(), Error>;
+}
+
+#[async_trait]
+impl<W> RkvmWriter for W
+where
+    W: AsyncWrite + Unpin + Send,
+{
+    async fn send(&mut self, update: Update) -> Result<(), Error> {
+        update.encode(self).await?;
+        self.flush().await?;
+        Ok(())
     }
 }

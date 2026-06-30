@@ -1,7 +1,7 @@
+use crate::client::RkvmWriter;
+
 use rkvm_input::{event::Event, writer::EventWriter};
 use rkvm_net::Update;
-
-use crate::stream::RkvmWriter;
 
 use async_trait::async_trait;
 use std::io::Error;

@@ -1,22 +1,20 @@
 #![cfg(target_os="windows")]
 mod client;
 mod config;
-mod stream;
-mod tls;
+mod connection;
 mod windows_daemon;
 
-use crate::stream::{RkvmWriter, LockWriter};
-use crate::windows_daemon::{writer::ClientWriter, client_process::ClientProcess};
+use crate::client::{init_tracing, Error, RkvmWriter};
+use crate::windows_daemon::{writer::ClientWriter, client_process::ClientProcess, stream::LockWriter};
 
-use client::{init_tracing, init_config, Error};
-use rkvm_input::windows::writer::WritersWindows;
+use rkvm_input::windows::writer::WriterWindows;
 use rkvm_net::Update;
 use std::ffi::OsString;
 use std::path::PathBuf;
-use tokio::sync::mpsc::{channel, Receiver};
 use std::time::Duration;
 use tokio::io::{WriteHalf, split};
 use tokio::net::windows::named_pipe::NamedPipeServer;
+use tokio::sync::mpsc::{channel, Receiver};
 use tokio::time::interval;
 use tracing::Instrument;
 use windows_service::define_windows_service;
@@ -134,12 +132,10 @@ async fn process(rx: &mut Receiver<ServiceEvent>) -> Result<(), Error> {
 
     let mut cl:ClientProcess = ClientProcess::new().await?;
 
-    let config = init_config(SERVICE_CFG).await?;
-    let connector = tls::configure(&config.certificate).await?;
-    let stream = client::init_stream(&config.server.hostname, config.server.port, &connector, &config.password).await?;
+    let stream = connection::init_stream(SERVICE_CFG).await?;
     let (mut stream_r, mut stream_w) = split(stream);
 
-    let srv_update = WritersWindows::new(ClientWriter::new(cl.writer()));
+    let srv_update = WriterWindows::new(ClientWriter::new(cl.writer()));
 
     let ping_w = cl.writer();
     let mut restart_w = cl.writer();

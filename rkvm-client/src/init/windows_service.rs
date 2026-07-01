@@ -7,13 +7,14 @@ use std::task::{Context, Poll};
 use tokio::io::{AsyncRead, AsyncWrite, BufStream};
 use tokio::net::windows::named_pipe::{ ClientOptions, NamedPipeClient };
 use tokio::time::{Duration, sleep};
-use windows_sys::Win32::Foundation::ERROR_PIPE_BUSY;
+
+const ERROR_PIPE_BUSY: i32 = 231;
 
 pub async fn stream(config_path: &PathBuf) -> Result<PipeStream,Error> {
     let pipe = loop {
         match ClientOptions::new().open(config_path.clone())  {
             Ok(client) => break client,
-            Err(e) if e.raw_os_error() == Some(ERROR_PIPE_BUSY as i32) => (),
+            Err(e) if e.raw_os_error() == Some(ERROR_PIPE_BUSY) => (),
             Err(e) => return Err(Error::Io(e)),
         }
 

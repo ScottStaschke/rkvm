@@ -8,7 +8,7 @@ cd /d "%~dp0\.."
 
 echo Copying release
 if not exist "%BASE_PATH%" mkdir "%BASE_PATH%"
-del "%BASE_PATH%"\*.log "%BASE_PATH%"\*.exe
+del "%BASE_PATH%"\*.log* "%BASE_PATH%"\*.exe
 copy target\release\rkvm-service.exe "%BASE_PATH%"
 copy target\release\rkvm-client.exe "%BASE_PATH%"
 

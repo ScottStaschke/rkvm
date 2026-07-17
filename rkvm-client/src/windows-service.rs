@@ -10,22 +10,26 @@ use crate::windows_daemon::{writer::ClientWriter, client_process::ClientProcess,
 use rkvm_input::windows::writer::WriterWindows;
 use rkvm_net::Update;
 use std::ffi::OsString;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
+use std::thread::sleep;
 use tokio::io::{WriteHalf, split};
 use tokio::net::windows::named_pipe::NamedPipeServer;
 use tokio::sync::mpsc::{channel, Receiver};
 use tokio::time::interval;
 use tracing::Instrument;
 use windows_service::define_windows_service;
-use windows_service::service::{ServiceControl, ServiceControlAccept, ServiceExitCode, ServiceState, ServiceStatus,ServiceType};
-use windows_service::service_control_handler::{register, ServiceControlHandlerResult};
+use windows_service::service::{ServiceControl,ServiceControlAccept,ServiceExitCode,ServiceState,ServiceStatus,ServiceType};
+use windows_service::service_control_handler::{register,ServiceStatusHandle,ServiceControlHandlerResult};
 use windows_service::service_dispatcher;
 
 const SERVICE_NAME: &str = "RkvmService";
-const SERVICE_TYPE: ServiceType = ServiceType::OWN_PROCESS;
 const SERVICE_LOG: &str = r"C:\ProgramData\rkvm\rkvm-service.log";
 const SERVICE_CFG: &str = r"C:\ProgramData\rkvm\client.toml";
+
+static CHECKPOINT: AtomicU32 = AtomicU32::new(0);
+const WAIT_HINT: Duration = Duration::from_secs(30);
 
 enum ServiceEvent {
     Stop,
@@ -34,22 +38,60 @@ enum ServiceEvent {
 
 define_windows_service!(ffi_service_main, service_main);
 
+fn set_service_state(handle: &ServiceStatusHandle, state: ServiceState, exit_code: u32) -> windows_service::Result<()> {
+    let controls = match state {
+        ServiceState::Running => ServiceControlAccept::STOP | ServiceControlAccept::SESSION_CHANGE,
+        _ => ServiceControlAccept::empty()
+    };
+    let checkpoint = match state {
+        ServiceState::StartPending => CHECKPOINT.fetch_add(1, Ordering::SeqCst) + 1,
+        _ => {
+            CHECKPOINT.store(0, Ordering::SeqCst);
+            0
+        }
+    };
+    let wait_hint = match state {
+        ServiceState::StartPending => WAIT_HINT,
+        _ => Duration::default()
+    };
+
+    let status = ServiceStatus {
+        service_type: ServiceType::OWN_PROCESS,
+        current_state: state,
+        controls_accepted: controls,
+        exit_code: ServiceExitCode::Win32(exit_code),
+        checkpoint: checkpoint,
+        wait_hint: wait_hint,
+        process_id: None,
+    };
+    handle.set_service_status(status)
+}
+
 fn main() -> windows_service::Result<()> {
     service_dispatcher::start(SERVICE_NAME, ffi_service_main)?;
     Ok(())
 }
 
-fn service_main(_arguments: Vec<OsString>) {
-    init_tracing(&"info".to_string(), &Some(PathBuf::from(SERVICE_LOG)));
-    tracing::info!("Starting service");
-    if let Err(e) = run_service() {
-        let _ = std::fs::write(r"C:\Windows\Temp\rkvm-service.log", format!("Service error: {e:#?}"));
-        tracing::error!("Service error: {:?}", e);
+fn wait_disk(handle: &ServiceStatusHandle) -> windows_service::Result<()> {
+    let path = Path::new(r"C:\ProgramData\rkvm\tmp");
+
+    loop {
+        set_service_state(&handle, ServiceState::StartPending, 0)?;
+        if let Ok(_) = std::fs::write(path, "test") {
+            let _ = std::fs::remove_file(path);
+            return Ok(());
+        }
+        sleep(Duration::from_millis(1000));
     }
 }
 
-fn run_service() -> windows_service::Result<()> {
-    let (tx, rx) = channel(4);
+fn service_main(_arguments: Vec<OsString>) {
+    if let Err(e) = service_run() {
+        tracing::error!(error = ?e, "Service crashed");
+    }
+}
+fn service_run() -> windows_service::Result<()> {
+    let (tx, mut rx) = channel(4);
     let event_handler = move |control_event| -> ServiceControlHandlerResult {
         match control_event {
             ServiceControl::Stop => {
@@ -66,68 +108,29 @@ fn run_service() -> windows_service::Result<()> {
         }
     };
 
-    let status_handle = register(SERVICE_NAME, event_handler)?;
-
-    let status = ServiceStatus {
-        service_type: SERVICE_TYPE,
-        current_state: ServiceState::Running,
-        controls_accepted: ServiceControlAccept::STOP
-            | ServiceControlAccept::SESSION_CHANGE,
-        exit_code: ServiceExitCode::NO_ERROR,
-        checkpoint: 0,
-        wait_hint: Duration::default(),
-        process_id: None,
-    };
-    if let Err(e) = status_handle.set_service_status(status) {
-        tracing::error!("Failed to start service {:?}", e);
-        return Err(e);
-    }
+    let handle = register(SERVICE_NAME, event_handler)?;
+    set_service_state(&handle, ServiceState::StartPending, 0)?;
+    wait_disk(&handle)?;
+    init_tracing(&"info".to_string(), &Some(PathBuf::from(SERVICE_LOG)));
+    tracing::info!("Starting service");
 
     let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
-    match rt.block_on(process_loop(rx)) {
-          Ok(_) => {
-            tracing::info!("Service stopped normally");
-
-            status_handle.set_service_status(ServiceStatus {
-                service_type: SERVICE_TYPE,
-                current_state: ServiceState::Stopped,
-                controls_accepted: ServiceControlAccept::empty(),
-                exit_code: ServiceExitCode::Win32(0),
-                checkpoint: 0,
-                wait_hint: Duration::default(),
-                process_id: None,
-            })?;
-        }
-        Err(e) => {
-            tracing::error!(error = ?e, "Service crashed");
-
-            status_handle.set_service_status(ServiceStatus {
-                service_type: SERVICE_TYPE,
-                current_state: ServiceState::Stopped,
-                controls_accepted: ServiceControlAccept::empty(),
-                exit_code: ServiceExitCode::Win32(1),
-                checkpoint: 0,
-                wait_hint: Duration::default(),
-                process_id: None,
-            })?;
-        }
-    }
-    Ok(())
-}
-async fn process_loop(mut rx: Receiver<ServiceEvent>) -> Result<(), Error> {
     loop {
-        match process(&mut rx).await {
-            Ok(_) => break Ok(()),
-            Err(e) => {
-                tracing::error!(?e, "run_once crashed, restarting");
+        match rt.block_on(process(&handle,&mut rx)) {
+            Ok(_) => {
+                tracing::info!("Service stopped normally");
+                set_service_state(&handle, ServiceState::Stopped, 0)?;
             }
-        }
-
-        tokio::time::sleep(Duration::from_secs(2)).await;
+            Err(e) => {
+                tracing::error!(error = ?e, "Service crashed");
+                set_service_state(&handle, ServiceState::Stopped, 1)?;
+            }
+        };
+        sleep(Duration::from_secs(2));
     }
 }
 
-async fn process(rx: &mut Receiver<ServiceEvent>) -> Result<(), Error> {
+async fn process(handle: &ServiceStatusHandle, rx: &mut Receiver<ServiceEvent>) -> Result<(), Error> {
     tracing::info!("Service started");
 
     let mut cl:ClientProcess = ClientProcess::new().await?;
@@ -141,6 +144,7 @@ async fn process(rx: &mut Receiver<ServiceEvent>) -> Result<(), Error> {
     let mut restart_w = cl.writer();
     let span_server = tracing::info_span!("run", stream="server");
     let span_client = tracing::info_span!("run", stream="client");
+    set_service_state(&handle, ServiceState::Running, 0)?;
     tokio::select! {
         res = client::run(&mut stream_r, &mut stream_w, srv_update).instrument(span_server) => res,
         res = cl.run().instrument(span_client) => res,

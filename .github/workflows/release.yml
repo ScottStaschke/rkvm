@@ -1,4 +1,4 @@
-name: Release
+name: Build
 
 on: [push]
 
@@ -10,8 +10,32 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-    - uses: actions/checkout@v3
+    - uses: actions/checkout@v4
     - name: Build
       run: sudo apt update && sudo apt -y install libevdev-dev && cargo build --verbose
     - name: Run tests
       run: cargo test --verbose
+
+  windows-client:
+    runs-on: windows-latest
+
+    steps:
+    - uses: actions/checkout@v4
+    - name: Build Windows service and client
+      run: cargo build --release -p rkvm-client --features windows-service -p rkvm-certificate-gen
+    - name: Package
+      shell: pwsh
+      run: |
+        New-Item -ItemType Directory -Path dist/rkvm-windows -Force
+        Copy-Item target/release/rkvm-client.exe dist/rkvm-windows/
+        Copy-Item target/release/rkvm-service.exe dist/rkvm-windows/
+        Copy-Item target/release/rkvm-certificate-gen.exe dist/rkvm-windows/
+        Copy-Item windows-service/install.bat dist/rkvm-windows/
+        Copy-Item windows-service/uninstall.bat dist/rkvm-windows/
+        Copy-Item example/client.toml dist/rkvm-windows/client.toml.example
+        Copy-Item WINDOWS.md dist/rkvm-windows/
+        Compress-Archive -Path dist/rkvm-windows/* -DestinationPath dist/rkvm-windows-x86_64.zip
+    - uses: actions/upload-artifact@v4
+      with:
+        name: rkvm-windows-x86_64
+        path: dist/rkvm-windows-x86_64.zip

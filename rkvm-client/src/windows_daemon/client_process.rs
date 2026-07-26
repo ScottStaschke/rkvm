@@ -100,6 +100,11 @@ fn launch_client() -> Result<HANDLE,Error> {
 
         let mut si = STARTUPINFOW::default();
         si.cb = std::mem::size_of::<STARTUPINFOW>() as u32;
+        // A service normally belongs to the non-interactive service window
+        // station. Start the injector on WinSta0 so its dedicated input thread
+        // can follow transitions between the user's desktop, UAC, and Winlogon.
+        let mut desktop = to_wide(r"winsta0\default");
+        si.lpDesktop = PWSTR(desktop.as_mut_ptr());
 
         let mut pi = PROCESS_INFORMATION::default();
         let mut cmd = to_wide(format!("\"{}\" --log-file {} {}", CLIENT_PATH, CLIENT_LOG, SERVICE_PIPE).as_str());
@@ -114,7 +119,9 @@ fn launch_client() -> Result<HANDLE,Error> {
 
 fn new_pipe(first: bool) -> Result<NamedPipeServer, Error> {
     unsafe {
-        let sddl = to_wide("D:(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;AU)");
+        // Both ends run as LocalSystem. Do not let an arbitrary authenticated
+        // desktop process impersonate the injector or feed events to the service.
+        let sddl = to_wide("D:P(A;;GA;;;SY)(A;;GA;;;BA)");
 
         let mut security_descriptor: PSECURITY_DESCRIPTOR = PSECURITY_DESCRIPTOR(null_mut());
 

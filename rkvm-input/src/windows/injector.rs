@@ -1,5 +1,6 @@
 use std::mem::size_of;
 use std::sync::mpsc::{channel, Receiver, Sender};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::LazyLock;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -16,8 +17,10 @@ use windows::{
 };
 
 const DESKTOP_REFRESH_INTERVAL: Duration = Duration::from_millis(10);
+const INJECTION_LOG_LIMIT: usize = 20;
 
 static TX: LazyLock<Sender<INPUT>> = LazyLock::new(create);
+static INJECTION_ATTEMPTS: AtomicUsize = AtomicUsize::new(0);
 
 pub fn send_input(input: INPUT) {
     if let Err(error) = TX.send(input) {
@@ -108,6 +111,17 @@ fn spawn(rx: Receiver<INPUT>) -> thread::JoinHandle<Result<(), core::Error>> {
                 }
 
                 let mut sent = unsafe { SendInput(&[input], size_of::<INPUT>() as i32) };
+                let attempt_number = INJECTION_ATTEMPTS.fetch_add(1, Ordering::Relaxed);
+
+                if attempt_number < INJECTION_LOG_LIMIT {
+                    tracing::info!(
+                        attempt_number = attempt_number + 1,
+                        input_type = input.r#type.0,
+                        sent,
+                        last_error = ?unsafe { GetLastError() },
+                        "SendInput result"
+                    );
+                }
 
                 if sent == 0 {
                     let first_error = unsafe { GetLastError() };

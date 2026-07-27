@@ -1,94 +1,109 @@
 # rkvm
-[![rkvm](https://img.shields.io/aur/version/rkvm)](https://aur.archlinux.org/packages/rkvm)
 
-rkvm is a tool for sharing keyboard and mouse across multiple Linux machines.
-It is based on a client/server architecture, where server is the machine controlling mouse and keyboard and relays events (mouse move, key presses, ...) to clients.
+rkvm shares a keyboard and mouse between computers by forwarding raw Linux
+input events over an encrypted connection. The Linux server captures the
+physical input devices, and each configured shortcut cycles control between the
+server and connected clients.
 
-Switching between different clients is done by a configurable keyboard shortcut.
+This fork adds an experimental native Windows client that runs as a Windows
+service and supports the normal desktop, UAC secure desktop, and the Windows
+lock/sign-in desktop.
 
 ## Features
-- TLS encrypted by default, backed by [rustls](https://github.com/rustls/rustls)
-- Display server agnostic (in fact, it doesn't require a display server at all)
-- Low overhead
 
-## Requirements
-- The uinput Linux kernel module, enabled by default in most distros. You can confirm that it's enabled in your distro by checking that `/dev/uinput` exists.
+- TLS encryption using [rustls](https://github.com/rustls/rustls)
+- Linux server and Linux client
+- Native Windows client service
+- UAC and lock-screen input support on Windows
+- Display-server independent: X11, Wayland, and a graphical session are not
+  required
+- Raw key forwarding without keyboard-layout translation
+- Configurable multi-key switching shortcut
+
+## Compatibility
+
+The Windows client in this fork uses protocol version 6. The server and client
+must come from the same release of this fork. The stock RKVM 0.6.1 package uses
+protocol version 5 and is not compatible.
+
+## Documentation
+
+- [Windows installation, configuration, and troubleshooting](WINDOWS.md)
+- [Declarative NixOS server setup](NIXOS.md)
+- [Supported switching keys](switch-keys.md)
+
+## Linux requirements
+
+- The `uinput` kernel module. Confirm that `/dev/uinput` exists.
 - libevdev development files (`sudo apt install libevdev-dev` on Debian/Ubuntu)
 - Clang/LLVM (`sudo apt install clang` on Debian/Ubuntu)
 
-## Manual installation
-If you can, it is strongly recommended to use the [AUR package](https://aur.archlinux.org/packages/rkvm) to install rkvm.  
-Note that the master branch can contain untested and breaking changes - for regular use, it is recommended to pick the latest [release](https://github.com/htrefil/rkvm/releases) instead.
+## Build from source
 
-```
-$ cargo build --release
-# cp target/release/rkvm-client /usr/bin/
-# cp target/release/rkvm-server /usr/bin/
-# cp target/release/rkvm-certificate-gen /usr/bin/ # Optional
-# cp systemd/rkvm-client.service /usr/lib/systemd/system/
-# cp systemd/rkvm-server.service /usr/lib/systemd/system/
+```console
+cargo build --release
+sudo install -Dm755 target/release/rkvm-server /usr/local/bin/rkvm-server
+sudo install -Dm755 target/release/rkvm-client /usr/local/bin/rkvm-client
+sudo install -Dm755 target/release/rkvm-certificate-gen \
+  /usr/local/bin/rkvm-certificate-gen
 ```
 
-## Configuration
-After installation:
-- Generate a certificate and private key using the `rkvm-certificate-gen` tool or provide your own from other sources.
-- For server, place both the certificate and private key in `/etc/rkvm/certificate.pem` and `/etc/rkvm/key.pem` respectively.
-- For client, place the certificate to `/etc/rkvm/certificate.pem`.
-- Create a config if you haven't done so already.  
-  Server:  
-  ```
-  # cp /usr/share/rkvm/examples/server.toml /etc/rkvm/server.toml
-  ```
-  Client:
-  ```
-  # cp /usr/share/rkvm/examples/client.toml /etc/rkvm/client.toml
-  ```
-  Do not edit the example configs, they will be overwritten by your package manager.
-- **Change the password** and optionally reconfigure the network listen address and key bindings for switching clients  
-- Since rkvm-server grabs all input, i's a good idea to do a test run first to make sure you won't end up
-  being unable to user your keyboard and/or mouse because your display server is not properly configured to receive input from rkvm.
+For Windows, download the ZIP attached to the latest GitHub release instead of
+building manually.
 
-  Run the following command to start rkvm-server for 15 seconds to test that your keyboard, mouse, etc. works properly:
-  ```
-  # rkvm-server /etc/rkvm/server.toml --shutdown-after 15
-  ```
+## Basic server setup
 
-- Enable and start the systemd service.  
-  Server:
-  ```
-  # systemctl enable rkvm-server
-  # systemctl start rkvm-server
-  ```
-  Client:
-  ```
-  # systemctl enable rkvm-client
-  # systemctl start rkvm-client
-  ```
+Generate a certificate and private key:
 
-## Why rkvm and not Barrier/Synergy?
-The author of this program had a lot of problems with said programs, namely his keyboard layout (Czech) not being supported properly, which stems from the fact that the programs send characters which it then attempts to translate back into keycodes. rkvm takes a different approach to solving this problem and doesn't assume anything about your keyboard layout -- it sends raw keycodes only.
+```console
+sudo install -d -m 0755 /etc/rkvm
+sudo rkvm-certificate-gen \
+  /etc/rkvm/certificate.pem \
+  /etc/rkvm/key.pem \
+  --dns-name "$(hostname)" \
+  --ip-address 192.0.2.10
+sudo chmod 0644 /etc/rkvm/certificate.pem
+sudo chmod 0600 /etc/rkvm/key.pem
+```
 
-Additionally, rkvm doesn't even know or care about X, Wayland or any display server that might be in use, because it uses the uinput API with libevdev to read and generate input events.
+Replace `192.0.2.10` with the server address used by clients. Copy
+`example/server.toml` to `/etc/rkvm/server.toml`, then change the password and
+switching shortcut.
 
-Regardless, if you want a working and stable solution for crossplatform keyboard and mouse sharing, you should probably use either of the above mentioned programs for the time being.
+Test the server before enabling it permanently:
 
-## Limitations
-- Linux only
+```console
+sudo rkvm-server /etc/rkvm/server.toml --shutdown-after 15
+```
+
+The example service files are in [`systemd`](systemd).
+
+## Security boundaries
+
+The Windows service runs as LocalSystem because input on UAC and Winlogon
+desktops requires elevated desktop access. Its local named pipe is restricted
+to LocalSystem and administrators.
+
+Windows deliberately prevents applications from synthesizing
+Ctrl+Alt+Delete. Keep a physical input device available for the secure-attention
+sequence and during initial testing.
 
 ## Project structure
-- `rkvm-server` - server application code
-- `rkvm-client` - client application code
-- `rkvm-input` - handles reading from and writing to input devices
-- `rkvm-net` - network protocol encoding and decoding
-- `rkvm-certificate-gen` - certificate generation tool
 
-[Bincode](https://github.com/servo/bincode) is used for encoding of messages on the network and [Tokio](https://tokio.rs) as an asynchronous runtime.
+- `rkvm-server` - captures Linux input and forwards it to clients
+- `rkvm-client` - Linux client and Windows service/client processes
+- `rkvm-input` - Linux input handling and Windows input injection
+- `rkvm-net` - protocol encoding, authentication, and TLS
+- `rkvm-certificate-gen` - certificate generation utility
+- `windows-service` - Windows installer and uninstaller
 
-## Contributions
-All contributions, that includes both PRs and issues, are very welcome.
+## Origin and license
 
-## Donations
-If you find rkvm useful, you can donate to the original author and maintainer using [Ko-fi](https://ko-fi.com/htrefil).
+This project is based on [htrefil/rkvm](https://github.com/htrefil/rkvm) and
+includes work derived from the experimental Windows client by
+[Unknow0/rkvm](https://github.com/Unknow0/rkvm).
 
-## License
-[MIT](LICENSE)
+Contributions are welcome. If you find RKVM useful, you can support the original
+author through [Ko-fi](https://ko-fi.com/htrefil).
+
+Licensed under the [MIT License](LICENSE).

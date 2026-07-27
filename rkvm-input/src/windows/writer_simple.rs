@@ -10,12 +10,8 @@ use async_trait::async_trait;
 use std::ffi::CString;
 use std::io::Error;
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicUsize, Ordering};
 
 use windows::Win32::UI::Input::KeyboardAndMouse::*;
-
-const EVENT_LOG_LIMIT: usize = 20;
-static RECEIVED_EVENTS: AtomicUsize = AtomicUsize::new(0);
 
 pub struct WriterWindowsSimple {
 }
@@ -38,17 +34,7 @@ impl DeviceWriter for WriterWindowsSimple {
 
 #[async_trait]
 impl EventWriter for WriterWindowsSimple {
-    async fn event(&mut self, id: usize, event: Event) -> Result<(), Error> {
-        let event_number = RECEIVED_EVENTS.fetch_add(1, Ordering::Relaxed);
-        if event_number < EVENT_LOG_LIMIT {
-            tracing::info!(
-                event_number = event_number + 1,
-                device_id = id,
-                event = ?event,
-                "Injector received input event"
-            );
-        }
-
+    async fn event(&mut self, _id: usize, event: Event) -> Result<(), Error> {
         match event {
             Event::Key(KeyEvent { key, down }) => {
                 match key {

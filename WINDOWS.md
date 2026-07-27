@@ -1,37 +1,205 @@
 # RKVM Windows client
 
-This branch contains an experimental Windows client for an RKVM server running
-on Linux. The service runs as LocalSystem and launches the input injector on the
-interactive window station.
+The Windows client consists of two processes:
 
-## UAC and lock-screen behavior
+- `rkvm-service.exe` runs as the LocalSystem Windows service, owns the encrypted
+  connection to the Linux server, and supervises the injector.
+- `rkvm-client.exe` runs in the active interactive session and injects the
+  received input.
 
-The injector follows changes to the active input desktop. This allows it to
-continue working when Windows switches from `WinSta0\Default` to a UAC or
-Winlogon desktop, provided the RKVM service is installed and running.
+The injector follows the active Windows input desktop so it can continue
+working on the normal desktop, UAC prompts, and the Windows lock/sign-in
+desktop.
 
-Windows deliberately prevents applications from synthesizing the secure
-attention sequence (`Ctrl+Alt+Delete`). If the computer's security policy
-requires that sequence before sign-in, use the computer's physical keyboard or
-a signed virtual HID driver. RKVM does not bypass that Windows security
-boundary.
+## Requirements
 
-Input on UAC and sign-in surfaces should be treated as experimental until it has
-been tested on the target Windows version and security policy. Keep a physical
-keyboard and mouse connected during testing.
+- A 64-bit Windows 10 or Windows 11 client
+- Administrator access for installation
+- An RKVM Linux server from the same release of this fork
+- The public `certificate.pem` generated on the server
+- A physical keyboard or mouse available during initial testing
+
+The stock RKVM 0.6.1 server uses protocol 5. This Windows client uses protocol
+6, so mixing the stock server with this client produces a version error.
+
+## Download
+
+Download `rkvm-windows-x86_64.zip` from the latest GitHub release and extract
+it to a temporary directory.
+
+## Configure
+
+Copy the server's public certificate into the extracted directory as:
+
+```text
+certificate.pem
+```
+
+Do not copy the server's private `key.pem` to Windows.
+
+Copy `client.toml.example` to `client.toml` and edit it:
+
+```toml
+server = "rkvm-server.local:5258"
+certificate = "C:/ProgramData/rkvm/certificate.pem"
+password = "replace-with-the-server-password"
+```
+
+Using forward slashes in the Windows path avoids TOML backslash escaping. If
+backslashes are used, each one must be doubled:
+
+```toml
+certificate = "C:\\ProgramData\\rkvm\\certificate.pem"
+```
+
+The hostname or IP address in `server` must be present in the certificate's
+subject alternative names.
 
 ## Install
 
-1. Put the server's `certificate.pem` and an edited `client.toml` beside
-   `install.bat`.
-2. Run `install.bat` from an Administrator command prompt.
-3. Check `C:\ProgramData\rkvm\rkvm-service.log` and
-   `C:\ProgramData\rkvm\client.log`.
+Right-click Command Prompt or PowerShell, choose **Run as administrator**, move
+to the extracted directory, and run:
 
-The installer copies the configuration, certificate, service, and client to
-`C:\ProgramData\rkvm` and starts the `RkvmService` service.
+```bat
+install.bat
+```
+
+The installer:
+
+1. Stops and replaces an existing `RkvmService`.
+2. Copies the binaries, `client.toml`, and certificate to
+   `C:\ProgramData\rkvm`.
+3. Installs the service as LocalSystem with automatic startup and recovery.
+4. Starts the service.
+
+Check its status:
+
+```powershell
+Get-Service RkvmService
+```
+
+## Logs
+
+The two processes use separate logs:
+
+```text
+C:\ProgramData\rkvm\rkvm-service.log
+C:\ProgramData\rkvm\client.log
+```
+
+Read them from PowerShell:
+
+```powershell
+Get-Content "C:\ProgramData\rkvm\rkvm-service.log" -Tail 100
+Get-Content "C:\ProgramData\rkvm\client.log" -Tail 100
+```
+
+Expected startup milestones include:
+
+```text
+client started with pid ...
+Connected to server
+TLS connected
+Authenticated successfully
+Created new device ...
+```
+
+## Switching
+
+The switching shortcut is configured on the Linux server. For example:
+
+```toml
+switch-keys = ["left-meta", "left-alt", "space"]
+propagate-switch-keys = false
+```
+
+This uses Left Windows/Super + Left Alt + Space. Restart the server after
+changing its configuration.
+
+## UAC and lock screen
+
+The injector dynamically follows transitions from `WinSta0\Default` to UAC and
+Winlogon desktops. Input on these surfaces depends on Windows version and local
+security policy and should be treated as experimental.
+
+Windows intentionally blocks software-generated Ctrl+Alt+Delete. If policy
+requires that sequence before sign-in, use a physical keyboard. RKVM does not
+bypass this security boundary.
+
+## VirtualBox testing
+
+Testing a Linux RKVM server inside a VirtualBox VM on the same Windows computer
+that runs the client can be misleading. VirtualBox mouse integration and input
+capture may immediately route RKVM's injected Windows events back into the
+guest.
+
+Symptoms include:
+
+- The server reports that it switched to the Windows client.
+- Windows reports successful input injection.
+- The Windows pointer does not visibly move.
+- Toggling VirtualBox mouse integration changes the behavior.
+
+For a reliable test, disable or toggle mouse integration as needed, release
+VirtualBox input capture, use dedicated USB input passed to the guest while the
+VM is unfocused, run the VM headlessly, or test with a separate Windows
+computer.
+
+## Troubleshooting
+
+### `InvalidEscape('P')`
+
+A Windows path such as `"C:\ProgramData\..."` was placed directly in TOML.
+Use forward slashes or doubled backslashes as shown above.
+
+### `Version { server: Version(6), client: Version(5) }`
+
+The labels in this older error are misleading. It means one side uses protocol
+6 and the other uses protocol 5. Install the matching server and Windows client
+from the same release of this fork.
+
+### Connection timeout
+
+Confirm that the server listens on the configured address and that TCP port
+5258 is allowed through the server firewall.
+
+### TLS error
+
+Confirm that:
+
+- `certificate.pem` is the public certificate generated by the server.
+- The configured hostname or IP address is included in that certificate.
+- The Windows TOML path points to
+  `C:/ProgramData/rkvm/certificate.pem`.
+
+### Service starts but input does not move
+
+Confirm that `rkvm-client.exe` is running in the same interactive session as
+Explorer:
+
+```powershell
+Get-Process rkvm-client, rkvm-service, explorer |
+  Select-Object Name, Id, SessionId
+```
+
+Normally, `rkvm-service` is in session 0 while `rkvm-client` and `explorer` use
+the same nonzero session.
+
+When the server is running in a VirtualBox VM on the Windows client, also follow
+the VirtualBox guidance above.
+
+## Upgrade
+
+Extract the newer release, place the existing `client.toml` and
+`certificate.pem` beside `install.bat`, and run the installer again as
+Administrator.
 
 ## Uninstall
 
-Run `uninstall.bat` from an Administrator command prompt. Configuration and log
-files are retained in `C:\ProgramData\rkvm`.
+Run this from an Administrator terminal:
+
+```bat
+uninstall.bat
+```
+
+Configuration and logs are retained in `C:\ProgramData\rkvm`.

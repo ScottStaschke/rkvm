@@ -13,30 +13,52 @@ use std::collections::{HashMap, HashSet};
 
 use windows::Win32::UI::Input::KeyboardAndMouse::*;
 
+#[derive(Default)]
+struct PendingMotion {
+    dx: i32,
+    dy: i32,
+}
+
 pub struct WriterWindowsSimple {
+    motion: HashMap<usize, PendingMotion>,
 }
 
 impl WriterWindowsSimple {
     pub fn new() -> Self {
-        WriterWindowsSimple {}
+        WriterWindowsSimple { motion: HashMap::new() }
+    }
+
+    fn flush_motion(&mut self, id: usize) {
+        let Some(motion) = self.motion.get_mut(&id) else {
+            return;
+        };
+
+        if motion.dx != 0 || motion.dy != 0 {
+            mouse_move(false, motion.dx, motion.dy);
+            *motion = PendingMotion::default();
+        }
     }
 }
 
 #[async_trait]
 impl DeviceWriter for WriterWindowsSimple {
-    async fn create_device(&mut self, _id: usize, _name: &CString, _vendor: u16, _product: u16, _version: u16, _rel: HashSet<RelAxis>, _abs: HashMap<AbsAxis, AbsInfo>, _keys: HashSet<Key>, _delay: Option<i32>, _period: Option<i32>) -> Result<(), Error> {
+    async fn create_device(&mut self, id: usize, _name: &CString, _vendor: u16, _product: u16, _version: u16, _rel: HashSet<RelAxis>, _abs: HashMap<AbsAxis, AbsInfo>, _keys: HashSet<Key>, _delay: Option<i32>, _period: Option<i32>) -> Result<(), Error> {
+        self.motion.insert(id, PendingMotion::default());
         Ok(())
     }
-    async fn destroy_device(&mut self, _id: usize) -> Result<(), Error> {
+    async fn destroy_device(&mut self, id: usize) -> Result<(), Error> {
+        self.flush_motion(id);
+        self.motion.remove(&id);
         Ok(())
     }
 }
 
 #[async_trait]
 impl EventWriter for WriterWindowsSimple {
-    async fn event(&mut self, _id: usize, event: Event) -> Result<(), Error> {
+    async fn event(&mut self, id: usize, event: Event) -> Result<(), Error> {
         match event {
             Event::Key(KeyEvent { key, down }) => {
+                self.flush_motion(id);
                 match key {
                     Key::Key(k) => send_key(k, down),
                     Key::Button(b) => button(b, down),
@@ -44,16 +66,35 @@ impl EventWriter for WriterWindowsSimple {
             }
             Event::Rel(RelEvent { axis, value }) => {
                 match axis {
-                    RelAxis::X => mouse_move(false, value, 0),
-                    RelAxis::Y => mouse_move(false, 0, value),
-                    RelAxis::Wheel => mouse_data(MOUSEEVENTF_WHEEL, value*120),
-                    RelAxis::HWheel => mouse_data(MOUSEEVENTF_HWHEEL, value*120),
-                    RelAxis::WheelHiRes => mouse_data(MOUSEEVENTF_WHEEL, value),
-                    RelAxis::HWheelHiRes => mouse_data(MOUSEEVENTF_HWHEEL, value),
+                    RelAxis::X => {
+                        let motion = self.motion.entry(id).or_default();
+                        motion.dx = motion.dx.saturating_add(value);
+                    }
+                    RelAxis::Y => {
+                        let motion = self.motion.entry(id).or_default();
+                        motion.dy = motion.dy.saturating_add(value);
+                    }
+                    RelAxis::Wheel => {
+                        self.flush_motion(id);
+                        mouse_data(MOUSEEVENTF_WHEEL, value*120)
+                    }
+                    RelAxis::HWheel => {
+                        self.flush_motion(id);
+                        mouse_data(MOUSEEVENTF_HWHEEL, value*120)
+                    }
+                    RelAxis::WheelHiRes => {
+                        self.flush_motion(id);
+                        mouse_data(MOUSEEVENTF_WHEEL, value)
+                    }
+                    RelAxis::HWheelHiRes => {
+                        self.flush_motion(id);
+                        mouse_data(MOUSEEVENTF_HWHEEL, value)
+                    }
                     _ => tracing::warn!("Axe not handled: {:?}", axis),
                 }
             }
             Event::Abs(event) => {
+                self.flush_motion(id);
                 match event {
                     AbsEvent::Axis { axis, value } => {
                             match axis {
@@ -65,7 +106,7 @@ impl EventWriter for WriterWindowsSimple {
                     _ => tracing::warn!("Abs event not handled: {:?}", event),
                 }
             }
-            _ => {}
+            Event::Sync(_) => self.flush_motion(id),
         }
 
         Ok(())

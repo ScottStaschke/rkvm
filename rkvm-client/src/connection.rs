@@ -50,6 +50,7 @@ pub async fn init_stream<P: AsRef<Path> + ?Sized>(config_path: &P) -> Result<Buf
     tracing::info!("Connected to server");
 
     let stream = connect(&config.server.hostname, config.server.port).await?;
+    stream.set_nodelay(true).map_err(Error::Network)?;
     let stream = rkvm_net::timeout(
         rkvm_net::TLS_TIMEOUT,
         connector.connect(config.server.hostname.clone(), stream),

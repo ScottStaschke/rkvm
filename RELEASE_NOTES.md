@@ -1,10 +1,16 @@
-# RKVM 0.6.1 Windows Preview 1
+# RKVM 0.6.1 Windows Preview 2
 
-This preview adds a native Windows client to the RKVM Linux input-sharing
-server.
+This preview improves mouse responsiveness in the native Windows client and
+retains the secure-desktop support introduced in Preview 1.
 
 ## Highlights
 
+- Coalesces horizontal and vertical mouse deltas from each Linux input frame
+  into one Windows `SendInput` movement.
+- Enables `TCP_NODELAY` on the client and server to avoid latency from buffering
+  small input messages.
+- Preserves event ordering between mouse movement, buttons, and wheel input.
+- Uses saturating motion accumulation to avoid integer overflow.
 - Installs as an automatically started LocalSystem Windows service.
 - Launches a supervised input injector in the active interactive session.
 - Follows Windows desktop changes for the normal desktop, UAC prompts, and the
